@@ -41,6 +41,9 @@ _G.CEID = (_G.CEID or 0) + 1;
 local mID = _G.CEID;
 local function IA() return _G.CEID == mID end;
 
+-- Private In-Memory Character Tracker (Avoids detection via BoolValue/StringValue in Character)
+local appliedCharacters = setmetatable({}, {__mode = "k"});
+
 local rN, rD, mI = lp.Name, lp.DisplayName, tostring(lpUserId);
 local rNL, rDL = rN:lower(), rD:lower();
 local isMobile = UIS.TouchEnabled and not UIS.KeyboardEnabled;
@@ -73,7 +76,6 @@ _G.CTH = function()
     pc(function() SG:SetCore(vg, {Title = vf, Text = "Auto Hide Head: " .. tostring(Cfg.AutoHideHead), Duration = 3}) end);
 end;
 
--- Safe Invisibility Toggle (Optional Manual Control)
 F.setInvis = function(state)
     S.isInvisible = (state == nil and not S.isInvisible or state);
     local ch = lp.Character;
@@ -128,8 +130,8 @@ F.sHD = function(ch, targetUid)
     if S.cDs then
         pc(function()
             local existingDesc = hum:FindFirstChild("HumanoidDescription") or fcc(hum, vm);
-            if existingDesc then hydrateDescription(existingDesc, S.cDs); if not existingDesc:FindFirstChild("_isCopierSpoof") then INew("BoolValue", existingDesc).Name = "_isCopierSpoof" end;
-            else local spoofDesc = INew("HumanoidDescription"); hydrateDescription(spoofDesc, S.cDs); spoofDesc.Name = "HumanoidDescription"; INew("BoolValue", spoofDesc).Name = "_isCopierSpoof"; makeArchivable(spoofDesc); spoofDesc.Parent = hum end;
+            if existingDesc then hydrateDescription(existingDesc, S.cDs);
+            else local spoofDesc = INew("HumanoidDescription"); hydrateDescription(spoofDesc, S.cDs); spoofDesc.Name = "HumanoidDescription"; makeArchivable(spoofDesc); spoofDesc.Parent = hum end;
             local emotes, equipped = S.cDs:GetEmotes(), S.cDs:GetEquippedEmotes();
             if emotes and next(emotes) then pc(function() hum:SetEmotes(emotes) end); S.spoofedEmotes = emotes end;
             if equipped and #equipped > 0 then
@@ -147,7 +149,7 @@ end;
 local function startSpoofGuard(ch)
     if not ch then return end; local hum = fcc(ch, v1); if not hum then return end;
     RC(hum.ChildRemoved:Connect(function(child) if (child.Name == "HumanoidDescription" or child:IsA("HumanoidDescription")) and S.isCopied then tw(0.05); F.sHD(ch) end end));
-    RC(hum.ChildAdded:Connect(function(child) if child:IsA("HumanoidDescription") and not child:FindFirstChild("_isCopierSpoof") and S.isCopied then tw(0.05); F.sHD(ch) end end));
+    RC(hum.ChildAdded:Connect(function(child) if child:IsA("HumanoidDescription") and S.isCopied then tw(0.05); F.sHD(ch) end end));
 end;
 
 local RuntimeTrackSync = {active = false, targetChar = nil, myChar = nil, playingTracks = {}};
@@ -209,93 +211,6 @@ local function playSpoofedEmote(emoteName)
     if track then track.Priority = Enum.AnimationPriority.Action; track:Play(); return true end;
     return false;
 end;
-
-local oldNamecall, oldIndex;
-local getAppliedDescFunc = function() return cachedSpoofDesc and cachedSpoofDesc:Clone() end;
-
--- Advanced Game Script Identity Interceptor / Cutscene Name Blocker
-local function hookAvatarMetatable()
-    local function handleNamecall(self, method, ...)
-        if not S.isCopied then return false end; local mLower = type(method) == "string" and method:lower() or "";
-        
-        if (mLower == "getnamefromuseridasync" or mLower == "getnamefromuserid") and self == Plrs then
-            local args = {...}; local numArg = tonumber(args[1]);
-            if (args[1] == lpUserId or (numArg and numArg == lpUserId) or (S.cU and (args[1] == S.cU or numArg == S.cU))) and S.tN ~= "" then
-                return true, S.tN;
-            end;
-        elseif (mLower == "getuseroidfromnameasync" or mLower == "getuseridfromname") and self == Plrs then
-            local args = {...}; local strArg = type(args[1]) == "string" and args[1]:lower() or "";
-            if (strArg == rNL or strArg == rDL or (S.tN ~= "" and strArg == S.tN:lower())) and S.cU then
-                return true, S.cU;
-            end;
-        elseif (mLower == "getuserinfosbyuseridsasync") and self == US then
-            local args = {...};
-            if type(args[1]) == "table" then
-                local res = {};
-                for _, id in ipairs(args[1]) do
-                    if tonumber(id) == lpUserId or (S.cU and tonumber(id) == S.cU) then
-                        table.insert(res, {Id = S.cU or lpUserId, Username = S.tN ~= "" and S.tN or rN, DisplayName = S.tD ~= "" and S.tD or rD});
-                    end;
-                end;
-                if #res > 0 then return true, res end;
-            end;
-        elseif mLower == "getapplieddescription" and typeof(self) == "Instance" and self:IsA(v1) then
-            if cachedSpoofDesc and (self:IsDescendantOf(lp.Character or workspace) or self.Parent == lp.Character) then return true, cachedSpoofDesc:Clone() end;
-        elseif mLower == "getemotes" and typeof(self) == "Instance" and self:IsA("HumanoidDescription") then
-            if cachedSpoofDesc and next(S.spoofedEmotes) then return true, S.spoofedEmotes end;
-        elseif mLower == "getequippedemotes" and typeof(self) == "Instance" and self:IsA("HumanoidDescription") then
-            if cachedSpoofDesc and #S.spoofedEquippedEmotes > 0 then return true, S.spoofedEquippedEmotes end;
-        elseif (mLower == "playemote" or mLower == "playemotebyid") then
-            local args = {...}; if args[1] and playSpoofedEmote(tostring(args[1])) then return true, true end;
-        elseif (mLower == "gethumanoiddescriptionfromuserid" or mLower == "gethumanoiddescriptionfromuseridasync") and self == Plrs then
-            local args = {...}; local numArg = tonumber(args[1]);
-            if cachedSpoofDesc and (args[1] == lpUserId or (numArg and numArg == lpUserId) or (S.cU and (args[1] == S.cU or numArg == S.cU))) then return true, cachedSpoofDesc:Clone() end;
-        elseif (mLower == "gethumanoiddescriptionfromoutfitid" or mLower == "gethumanoiddescriptionfromoutfitidasync") and self == Plrs then
-            if cachedSpoofDesc then return true, cachedSpoofDesc:Clone() end;
-        elseif (mLower == "getcharacterappearanceasync" or mLower == "getcharacterappearanceinfoasync") and self == Plrs then
-            local args = {...}; local numArg = tonumber(args[1]);
-            if S.cU and (args[1] == lpUserId or (numArg and numArg == lpUserId)) then return "redirect", S.cU, select(2, ...) end;
-        elseif (mLower == "applydescription" or mLower == "applydescriptionreset") and typeof(self) == "Instance" and self:IsA(v1) then
-            if cachedSpoofDesc and (self:IsDescendantOf(lp.Character or workspace) or self.Parent == lp.Character) then
-                ts(function()
-                    tw(0.05);
-                    if lp.Character then
-                        for _, item in ipairs(gC(lp.Character)) do
-                            if (item:IsA("ShirtGraphic") or item:IsA("Shirt") or item:IsA("Pants")) and not cCI[item] then des(item) end;
-                        end;
-                        F.sHD(lp.Character);
-                    end;
-                end);
-            end;
-        end;
-        return false;
-    end;
-
-    local function handleIndex(self, k)
-        if not S.isCopied then return false end; local kLower = type(k) == "string" and k:lower() or "";
-        if typeof(self) == "Instance" and self:IsA("Player") and (self == lp or self.UserId == lpUserId) then
-            if kLower == "name" and S.tN ~= "" then return true, S.tN
-            elseif kLower == "displayname" and S.tD ~= "" then return true, S.tD
-            elseif kLower == "userid" and S.cU then return true, S.cU
-            elseif kLower == "characterappearanceid" then return true, (S.cU or lpUserId) end;
-        elseif kLower == "getapplieddescription" and typeof(self) == "Instance" and self:IsA(v1) then
-            if cachedSpoofDesc and (self:IsDescendantOf(lp.Character or workspace) or self.Parent == lp.Character) then return true, getAppliedDescFunc end;
-        end;
-        return false;
-    end;
-
-    if type(hookmetamethod) == "function" then
-        oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
-            local method = getnamecallmethod and getnamecallmethod();
-            if method then local status, r1, r2 = handleNamecall(self, method, ...); if status == true then return r1 elseif status == "redirect" then return oldNamecall(self, r1, r2) end end;
-            return oldNamecall(self, ...);
-        end));
-        oldIndex = hookmetamethod(game, "__index", newcclosure(function(self, k)
-            local ok, val = handleIndex(self, k); if ok then return val end; return oldIndex(self, k);
-        end));
-    end;
-end;
-pc(hookAvatarMetatable);
 
 local function ensureGripAttachments(ch)
     if not ch then return end;
@@ -500,6 +415,7 @@ local function applyGraphicsReduction()
     end);
 end;
 
+-- Refined Head Texture Normalization
 local function normalizeHeadSize(h, dH, hum, targetDummy)
     if not h or not dH then return end;
     local targetScale = 1.0;
@@ -526,32 +442,33 @@ local function normalizeHeadSize(h, dH, hum, targetDummy)
 
     if dH:IsA(v4) then h.Color, h.Material = dH.Color, dH.Material end;
 
-    if h:IsA(v9) then
-        if dH:IsA(v9) then
-            pc(function() h.MeshId = dH.MeshId end);
-            pc(function() h.TextureID = dH.TextureID end);
-            h.Size = dH.Size;
-        else
-            pc(function() h.MeshId = "" end);
-            pc(function() h.TextureID = "" end);
-            h.Size = (dH:IsA(v4) and dH.Size) or V3(2, 1, 1);
-            local dM = fcc(dH, vj) or fcc(dH, vk) or fcc(dH, "BlockMesh") or fcc(dH, "CylinderMesh");
-            if dM then cln(dM).Parent = h
-            else local rM = INew(vj); rM.Name = "Mesh"; pc(function() rM.MeshType = Enum.MeshType.Head end); rM.Parent = h end;
-        end;
+    -- Mesh and Texture Sync Fix
+    if h:IsA(v9) and dH:IsA(v9) then
+        pc(function() h.MeshId = dH.MeshId end);
+        pc(function() h.TextureID = dH.TextureID end);
+        h.Size = dH.Size;
     else
         local dM = fcc(dH, vj) or fcc(dH, vk) or fcc(dH, "BlockMesh") or fcc(dH, "CylinderMesh");
-        if dM then cln(dM).Parent = h;
+        if dM then
+            cln(dM).Parent = h;
         elseif dH:IsA(v9) then
-            local rM = INew(vj); rM.Name, rM.MeshId = "Mesh", dH.MeshId;
-            local tex = dH.TextureID;
-            if not tex or tex == "" then local sa = fcc(dH, vi); if sa and sa:IsA(vi) and sa.ColorMap then tex = sa.ColorMap end end;
-            rM.TextureId, rM.Scale = tex or "", V3(1, 1, 1); pc(function() rM.MeshType = Enum.MeshType.FileMesh end); rM.Parent = h;
-        else local rM = INew(vj); rM.Name = "Mesh"; pc(function() rM.MeshType = Enum.MeshType.Head end); rM.Parent = h end;
+            local rM = INew(vj); rM.Name = "Mesh";
+            rM.MeshId = dH.MeshId;
+            rM.TextureId = dH.TextureID;
+            rM.Scale = V3(1, 1, 1);
+            pc(function() rM.MeshType = Enum.MeshType.FileMesh end);
+            rM.Parent = h;
+        else
+            local rM = INew(vj); rM.Name = "Mesh"; pc(function() rM.MeshType = Enum.MeshType.Head end); rM.Parent = h;
+        end;
     end;
 
-    local dSA = fcc(dH, vi); local rSA = fcc(h, vi);
-    if dSA then if rSA then des(rSA) end; cln(dSA).Parent = h elseif rSA then des(rSA) end;
+    -- SurfaceAppearance Support for Custom/Textured Heads
+    local dSA = fcc(dH, vi);
+    if dSA then
+        local rSA = fcc(h, vi); if rSA then des(rSA) end;
+        cln(dSA).Parent = h;
+    end;
 
     local dFC = fcc(dH, vl); local rFC = fcc(h, vl);
     if dFC then if rFC then des(rFC) end; cln(dFC).Parent = h elseif rFC then des(rFC) end;
@@ -1163,7 +1080,7 @@ F.sD = function(ds, rt)
     return d, false;
 end;
 
--- DOORS Fully Motorized Fallback Rig Generator (Fixes wall-clipping/movement physics)
+-- DOORS Fully Motorized Fallback Rig Generator
 local function createFallbackDummy(rt)
     local m = INew("Model");
     local h = INew("Humanoid", m);
@@ -1206,11 +1123,9 @@ local function createFallbackDummy(rt)
             {"RightUpperLeg", lt, "RightHip"}, {"RightLowerLeg", nil, "RightKnee"}, {"RightFoot", nil, "RightAnkle"}
         };
         
-        local createdParts = {UpperTorso = ut, LowerTorso = lt};
         for _, lData in ipairs(limbs) do
             local pName, parentPart, jName = lData[1], lData[2], lData[3];
             local p = INew("Part", m); p.Name = pName; p.Size = V3(1, 1, 1); p.CanCollide = false;
-            createdParts[pName] = p;
             if parentPart then
                 addJoint(parentPart, p, jName, CF(0, 0, 0), CF(0, 0, 0));
             end;
@@ -1220,7 +1135,6 @@ local function createFallbackDummy(rt)
     return m;
 end;
 
--- Target Loader Model Generator
 F.mD = function(uid, rt)
     local myRt = rt or F.gTRT(lp.Character) or eR15;
     local cK = tostring(uid) .. "_" .. tostring(myRt);
@@ -1265,7 +1179,6 @@ F.mD = function(uid, rt)
         end);
     end;
 
-    -- DOORS Emergency Fallback Dummy to prevent avatar copy failures
     if not d then
         d = createFallbackDummy(myRt);
     end;
@@ -1346,12 +1259,13 @@ local function getLimbFallback(tName, character)
     return ff(character, "Torso") or ff(character, "UpperTorso") or ff(character, v2);
 end;
 
+-- Full 3D Bundle Body Part Replacement Engine
 F.aAv = function(ch, dm)
     if not ch or not dm then return end; local hm = fcc(ch, v1); if not hm or hm.Health <= 0 or #gC(dm) < 2 then return end;
     local savedJP, savedJH, savedUJP = hm.JumpPower, hm.JumpHeight, hm.UseJumpPower; local cam = workspace.CurrentCamera; local oldCamSubj = cam and cam.CameraSubject;
     local backpack, savedTools, equippedTool = lp:FindFirstChildOfClass("Backpack"), {}, nil; local oldReqNeck = hm.RequiresNeck; hm.RequiresNeck = false;
 
-    -- Purge ALL existing clothing, proxy heads, old reapply elements, and duplicate T-shirts
+    -- Purge old copier accessories & 2D clothes
     for _, child in ipairs(gC(ch)) do
         if cCI[child] or child.Name:find("Proxy_") or child.Name == "CopierFakeHead" or child:IsA("ShirtGraphic") or child:IsA("Shirt") or child:IsA("Pants") or child:IsA("BodyColors") then
             des(child)
@@ -1403,6 +1317,7 @@ F.aAv = function(ch, dm)
     if lR == eR6 then hm.HipHeight = 0; ensureR6Attachments(ch) elseif dHm and dHm.HipHeight > 0 then hm.HipHeight = dHm.HipHeight end;
     local savedFC, curHead = nil, ff(ch, v3); if curHead then local fc = fcc(curHead, vl); if fc then savedFC = cln(fc) end end;
 
+    -- Full 3D Bundle Swap Execution
     if iLR15 and iTR15 then
         if hm and dHm then pc(function() for _, sv in ipairs({"BodyDepthScale", "BodyHeightScale", "BodyWidthScale", "HeadScale", "BodyProportionScale", "BodyTypeScale"}) do local dS = ff(dHm, sv); if dS and dS:IsA("NumberValue") then local mS = ff(hm, sv); local val = math.clamp(dS.Value, 0.25, 2.0); if sv == "HeadScale" then val = math.clamp(dS.Value, 0.5, 1.25) end; if mS then mS.Value = val else INew("NumberValue", hm).Name, INew("NumberValue", hm).Value = sv, val end end end end) end;
         for _, dp in ipairs(gC(d)) do if S.RM[dp.Name] and dp.Name ~= v3 then pc(function() hm:ReplaceBodyPartR15(S.RM[dp.Name], cln(dp)) end) end end;
@@ -1538,9 +1453,8 @@ end;
 
 F.rA = function(ch) local a = ff(ch, vz); if a then a.Enabled = false; a.Enabled = true end; ensureHumanoidStateAndMotors(ch) end;
 
--- Detection and morphing of game-spawned cutscene dummies
 local function isDummyCutsceneModel(m)
-    if not m or not m:IsA("Model") or m == lp.Character or m:FindFirstChild("_copierApplied") or m.Name == "LHDDummy" or m.Name:find("Copier") or m.Name:find("StartupP") then return false end;
+    if not m or not m:IsA("Model") or m == lp.Character or appliedCharacters[m] or m.Name == "LHDDummy" or m.Name:find("Copier") or m.Name:find("StartupP") then return false end;
     local hm = fcc(m, v1); if not hm then return false end;
     local mName, hDisplayName, tN, tD = m.Name:lower(), (hm.DisplayName or ""):lower(), gTN():lower(), gTD():lower();
     local isMatch = (mName == rNL or mName == rDL or (tN ~= "" and (mName == tN or mName == tD))) or (hDisplayName == rNL or hDisplayName == rDL or (tN ~= "" and (hDisplayName == tN or hDisplayName == tD)));
@@ -1554,7 +1468,7 @@ local function applyToCutsceneModel(cr)
     if not (cr:WaitForChild(v1, 3) and cr:WaitForChild(v2, 3) and cr:WaitForChild(v3, 3)) then return end;
     if isDummyCutsceneModel(cr) then
         cOE_cr[cr] = true;
-        pc(function() INew("BoolValue", cr).Name = "_copierApplied"; F.aAv(cr, S.cD); if S.cU then F.sHD(cr, S.cU) end; pc(function() F.cNA(cr, S.cU, S.cDs) end); F.rA(cr) end);
+        pc(function() appliedCharacters[cr] = true; F.aAv(cr, S.cD); if S.cU then F.sHD(cr, S.cU) end; pc(function() F.cNA(cr, S.cU, S.cDs) end); F.rA(cr) end);
     end;
 end;
 
@@ -1621,10 +1535,10 @@ RC(workspace.ChildAdded:Connect(function(v) if IA() and v:IsA("Model") and v ~= 
 if workspace.CurrentCamera then RC(workspace.CurrentCamera.ChildAdded:Connect(function(v) if IA() and v:IsA("Model") and v ~= lp.Character and isDummyCutsceneModel(v) then ts(applyToCutsceneModel, v) end end)) end;
 
 RC(lp.CharacterAdded:Connect(function(nC)
-    if not IA() or nC:FindFirstChild("_copierApplied") then return end; S.appliedThisLife = false; setupToolProtection(nC); setupClothingProtection(nC); if not S.isCopied or not S.cU then return end;
+    if not IA() or appliedCharacters[nC] then return end; S.appliedThisLife = false; setupToolProtection(nC); setupClothingProtection(nC); if not S.isCopied or not S.cU then return end;
     ts(function()
         local hm, root, head = nC:WaitForChild(v1, 10), nC:WaitForChild(v2, 10), nC:WaitForChild(v3, 10); if not hm or not root or not head or not IA() or not nC.Parent then return end;
-        INew("BoolValue", nC).Name = "_copierApplied"; tw(0.05);
+        appliedCharacters[nC] = true; tw(0.05);
         if S.isCopied then
             if S.mode == "clone" then CloneEngine.start(S.cU)
             else
