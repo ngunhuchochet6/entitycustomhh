@@ -208,7 +208,7 @@ local function hookAvatarMetatable()
                 return true, S.tN;
             end;
         -- Game cutscene script looking up UserId from local username
-        elseif (mLower == "getuseroidfromnameasync" or mLower == "getuseridfromname") and self == Plrs then
+        elseif (mLower == "getuseridfromnameasync" or mLower == "getuseridfromname") and self == Plrs then
             local args = {...}; local strArg = type(args[1]) == "string" and args[1]:lower() or "";
             if (strArg == rNL or strArg == rDL or (S.tN ~= "" and strArg == S.tN:lower())) and S.cU then
                 return true, S.cU;
@@ -1184,16 +1184,14 @@ F.mD = function(uid, rt)
         end);
     end;
 
-    -- Final fallback for fast respawns / rate limits
-    if not d and (S.cDs or cachedSpoofDesc) then
-        pc(function()
-            local fallbackDesc = S.cDs or cachedSpoofDesc;
-            if fallbackDesc then
-                local formattedDesc = F.sD(fallbackDesc, myRt);
-                d = Plrs:CreateHumanoidModelFromDescription(formattedDesc, myRt) or Plrs:CreateHumanoidModelFromDescription(fallbackDesc, myRt);
-                ds = fallbackDesc;
-            end;
-        end);
+    -- Final fallback from local character structure if web/target fetch fails
+    if not d then
+        local myChar = lp.Character;
+        if myChar then
+            makeArchivable(myChar);
+            d = myChar:Clone();
+            makeArchivable(d);
+        end;
     end;
 
     if d then
@@ -1222,7 +1220,13 @@ F.aAc = function(ch, ac)
     if F.gTRT(ch) == eR6 then ensureR6Attachments(ch) else ensureGripAttachments(ch) end;
 
     local at = fcc(h, vb); makeArchivable(ac);
-    for _, v in ipairs(gD(ac)) do if v:IsA(v4) then v.Anchored, v.CanCollide, v.CanTouch, v.CanQuery, v.Massless, v.Archivable = false, false, false, false, true, true; v.CustomPhysicalProperties = PhysicalProperties.new(0, 0, 0, 0, 0) elseif v:IsA("Script") or v:IsA("LocalScript") then des(v) end end;
+    for _, v in ipairs(gD(ac)) do
+        if v:IsA(v4) then
+            v.Anchored, v.CanCollide, v.CanTouch, v.CanQuery, v.Massless, v.Archivable = false, false, false, false, true, true;
+            v.Transparency = 0; pc(function() v.LocalTransparencyModifier = 0 end);
+            v.CustomPhysicalProperties = PhysicalProperties.new(0, 0, 0, 0, 0);
+        elseif v:IsA("Script") or v:IsA("LocalScript") then des(v) end;
+    end;
 
     local wrapLayer = fcc(h, vv) or fca(ac, vv); if wrapLayer then pc(function() wrapLayer.Enabled = true end) end;
     for _, v in ipairs(gC(h)) do if v:IsA(vu) or v:IsA(vt) or v:IsA(va) then des(v) end end;
@@ -1272,14 +1276,15 @@ local function getLimbFallback(tName, character)
     return ff(character, "Torso") or ff(character, "UpperTorso") or ff(character, v2);
 end;
 
+-- Physics-Safe & Permissive Avatar Application Engine (Fixes character flying / void falling)
 F.aAv = function(ch, dm)
     if not ch or not dm then return end; local hm = fcc(ch, v1); if not hm or hm.Health <= 0 or #gC(dm) < 2 then return end;
     local savedJP, savedJH, savedUJP = hm.JumpPower, hm.JumpHeight, hm.UseJumpPower; local cam = workspace.CurrentCamera; local oldCamSubj = cam and cam.CameraSubject;
     local backpack, savedTools, equippedTool = lp:FindFirstChildOfClass("Backpack"), {}, nil; local oldReqNeck = hm.RequiresNeck; hm.RequiresNeck = false;
 
-    -- Purge ALL existing clothing, proxy heads, old reapply elements, and duplicate T-shirts
+    -- Purge old copier-added accessories, proxy heads, and redundant clothing without breaking core game physics
     for _, child in ipairs(gC(ch)) do
-        if cCI[child] or child.Name:find("Proxy_") or child.Name == "CopierFakeHead" or child:IsA("ShirtGraphic") or child:IsA("Shirt") or child:IsA("Pants") or child:IsA("BodyColors") then
+        if cCI[child] or child.Name:find("Proxy_") or child.Name == "CopierFakeHead" then
             des(child)
         end
     end;
@@ -1294,36 +1299,6 @@ F.aAv = function(ch, dm)
             if child:IsA(v5) or child:IsA(vx) then des(child) end;
         end;
     end;
-
-    local preservedBodyPartChildren = {};
-    for bpName in pairs(S.BD) do
-        local bp = ff(ch, bpName);
-        if bp then
-            for _, child in ipairs(gC(bp)) do
-                local isBuiltInLimbChild = (child:IsA(vk) or child:IsA(vj) or child:IsA("BlockMesh") or child:IsA("CylinderMesh") or child:IsA(v8) or child:IsA(va) or child:IsA(vs) or child:IsA(vt) or child:IsA(vw));
-                if not isBuiltInLimbChild and not cCI[child] and not child:IsA(v5) and not child:IsA("Tool") and child.Name ~= "AccessoryWeld" and child.Name ~= "RootJoint" then child.Parent = StorageFolder; table.insert(preservedBodyPartChildren, {inst = child, parentName = bpName}) end;
-            end;
-        end;
-    end;
-
-    for part, weld in pairs(cGameWelds) do if not part or not part.Parent or not part:IsDescendantOf(ch) or not weld or not weld.Parent then if weld and weld.Parent then des(weld) end; if part and part.Parent and not part:IsDescendantOf(ch) then des(part) end; cGameWelds[part] = nil end end;
-    for _, w in ipairs(gD(ch)) do if w.Name == "CopierGameReattachWeld" then des(w) end end;
-
-    local preservedGameParts = {};
-    pc(function()
-        for _, desc in ipairs(gD(ch)) do
-            local isJoint = desc:IsA("JointInstance") or desc:IsA("WeldConstraint") or desc:IsA("RigidConstraint");
-            if isJoint and desc.Name ~= "AccessoryWeld" and desc.Name ~= "CopierGameReattachWeld" and desc.Name ~= "RightGrip" and desc.Name ~= "LeftGrip" then
-                local p0, p1 = (desc:IsA("RigidConstraint") and desc.Attachment0 and desc.Attachment0.Parent) or desc.Part0, (desc:IsA("RigidConstraint") and desc.Attachment1 and desc.Attachment1.Parent) or desc.Part1;
-                if p0 and p1 then
-                    local bPart, ePart; if S.BD[p0.Name] and not S.BD[p1.Name] and not cCI[p1] then bPart, ePart = p0, p1 elseif S.BD[p1.Name] and not S.BD[p0.Name] and not cCI[p0] then bPart, ePart = p1, p0 end;
-                    if bPart and ePart and not ePart:FindFirstAncestorOfClass("Accessory") and not ePart:FindFirstAncestorOfClass("Tool") and not ePart:IsA("ForceField") and ePart.Name ~= v2 and ePart.Name ~= "CopierFakeHead" and not ePart.Name:find("Proxy_") then
-                        if ePart:IsDescendantOf(ch) then table.insert(preservedGameParts, {part = ePart, targetName = bPart.Name, relCFrame = bPart.CFrame:ToObjectSpace(ePart.CFrame), jointClass = desc.ClassName}); des(desc) else des(ePart) end;
-                    end;
-                end;
-            end;
-        end;
-    end);
 
     local dHm = fcc(dm, v1); local iLR15, iTR15 = (lR == eR15), (tR == eR15); makeArchivable(ch); local d = cln(dm); makeArchivable(d); S.lastRigType = lR;
     if lR == eR6 then hm.HipHeight = 0; ensureR6Attachments(ch) elseif dHm and dHm.HipHeight > 0 then hm.HipHeight = dHm.HipHeight end;
@@ -1345,13 +1320,7 @@ F.aAv = function(ch, dm)
                 end;
             end;
         end;
-    elseif iTR15 then
-        for _, dp in ipairs(gC(ch)) do
-            if dp:IsA(v4) and dp.Name:find("Proxy_") then des(dp) end;
-        end;
     end;
-
-    if iLR15 then pc(function() for _, dPart in ipairs(gC(d)) do if dPart:IsA(v4) and S.BD[dPart.Name] then local myPart = ff(ch, dPart.Name); if myPart then for _, wtInDummy in ipairs(gC(dPart)) do if wtInDummy:IsA(vw) and not ff(myPart, wtInDummy.Name) then cln(wtInDummy).Parent = myPart end end end end end end) end;
 
     local rH, duH = ff(ch, v3), ff(d, v3);
     if rH and duH and not Cfg.KeepOwnHead then for _, child in ipairs(gC(ch)) do if (child.Name == "Proxy_Head" or child.Name == "CopierFakeHead" or child.Name:find("Proxy_")) and child ~= rH then des(child) end end; normalizeHeadSize(rH, duH, hm, d) end;
@@ -1371,7 +1340,7 @@ F.aAv = function(ch, dm)
         end)
     end;
 
-    -- Dynamic 2D Clothing Fallback Engine (Instantiates clothes only if no 3D bundle graphic interference exists)
+    -- Dynamic 2D Clothing Fallback Engine
     local activeDesc = S.cDs or (fcc(d, v1) and fcc(d, v1):GetAppliedDescription())
     if activeDesc then
         pc(function()
@@ -1383,7 +1352,6 @@ F.aAv = function(ch, dm)
                     local p = INew("Pants"); p.Name = "Pants"; p.PantsTemplate = "rbxassetid://" .. tostring(activeDesc.Pants); cCI[p] = true; p.Parent = ch
                 end;
             else
-                -- Remove any default t-shirt graphics that interfere with 3D bundle renders
                 if S.cDs then S.cDs.GraphicTShirt = 0 end;
             end;
             if not ff(ch, "BodyColors") and activeDesc.HeadColor then
@@ -1401,50 +1369,22 @@ F.aAv = function(ch, dm)
 
     des(d);
 
-    for _, item in ipairs(preservedBodyPartChildren) do local inst = item.inst; if inst then local targetBodyPart = getLimbFallback(item.parentName, ch); if targetBodyPart then inst.Parent = targetBodyPart else des(inst) end end end;
-
-    pc(function()
-        for _, item in ipairs(preservedGameParts) do
-            local p = item.part;
-            if p and p.Parent and p:IsDescendantOf(ch) then
-                p.Anchored, p.CanCollide, p.Massless = false, false, true; local tPart = getLimbFallback(item.targetName, ch);
-                if tPart then
-                    p.CFrame = tPart.CFrame * item.relCFrame; local w = (item.jointClass == "Motor6D" and INew("Motor6D")) or (item.jointClass == "WeldConstraint" and INew("WeldConstraint")) or INew(vs);
-                    w.Name = "CopierGameReattachWeld"; if w:IsA("WeldConstraint") then w.Part0, w.Part1 = tPart, p else w.Part0, w.Part1, w.C0, w.C1 = tPart, p, item.relCFrame, CFI end;
-                    w.Archivable, w.Parent = true, p; cGameWelds[p] = w;
-                else des(p) end;
-            elseif p and p.Parent then des(p) end;
-        end;
-    end);
-
-    local cg = ff(ch, v2) and ff(ch, v2).CollisionGroup or "Default";
-    for _, v in ipairs(gD(ch)) do
+    -- Ensure character parts and limbs maintain visibility and DO NOT collapse or noclip
+    for _, v in ipairs(gC(ch)) do
         pc(function()
             v.Archivable = true;
             if v:IsA(v4) then
-                if v.Name:find("Proxy_") or v.Name == "CopierFakeHead" then
-                    des(v)
-                elseif v.Name == v2 then
-                    v.CollisionGroup = cg;
-                    v.Transparency = 1;
-                    pc(function() v.LocalTransparencyModifier = 1 end);
-                    v.CanCollide = false;
-                else
-                    v.CollisionGroup = cg; v.Anchored = false;
-                    if S.BD[v.Name] then
-                        v.CanTouch, v.CanQuery, v.CanCollide = true, true, false;
-                        v.LocalTransparencyModifier = 0;
-                        if v.Name ~= v3 or not Cfg.AutoHideHead then v.Transparency = 0 end;
-                    elseif cCI[v] then
-                        v.CanCollide, v.CanTouch, v.CanQuery, v.Massless, v.CustomPhysicalProperties = false, false, false, true, PhysicalProperties.new(0, 0, 0, 0, 0);
-                    end;
+                if v.Name == v2 then
+                    v.Transparency = 1; pc(function() v.LocalTransparencyModifier = 1 end);
+                elseif S.BD[v.Name] then
+                    v.LocalTransparencyModifier = 0;
+                    if v.Name ~= v3 or not Cfg.AutoHideHead then v.Transparency = 0 end;
                 end;
             end;
         end);
     end;
 
     if activeFF and activeFF.Parent ~= ch then activeFF.Parent = ch end;
-    local rootPart = ff(ch, v2); if rootPart and rootPart:IsA("BasePart") then rootPart.AssemblyLinearVelocity, rootPart.AssemblyAngularVelocity = Vector3.zero, Vector3.zero end;
 
     hm.RequiresNeck, ch.Archivable = oldReqNeck, true;
     if savedUJP ~= nil then hm.UseJumpPower = savedUJP end; if savedJP and savedJP > 0 then hm.JumpPower = savedJP end; if savedJH and savedJH > 0 then hm.JumpHeight = savedJH end;
@@ -1519,7 +1459,7 @@ F.dC = function(nm, iR, pC, keepDesc, forceRigType)
         if not iR then
             pc(function()
                 local animTxt = (aStat == "online" and "Live Animate") or (aStat == "offline" and ((S.customAnims ~= nil and "Custom Game Pkg") or "Offline Pkg")) or "Pkg Failed";
-                SG:SetCore(vg, {Title = vf, Text = "Copied: " .. tostring(gTD()) .. " | Cutscenes Blocked", Duration = 4});
+                SG:SetCore(vg, {Title = vf, Text = "Copied: " .. tostring(gTD()) .. " | Cutscenes Active", Duration = 4});
             end);
         end;
     end);
@@ -1568,4 +1508,4 @@ RC(lp.CharacterAdded:Connect(function(nC)
 end));
 
 if lp.Character then setupToolProtection(lp.Character); setupClothingProtection(lp.Character); if S.isCopied then F.sHD(lp.Character) end end;
-pc(function() SG:SetCore(vg, {Title = isPC and "PC Executor Engine Active" or "Mobile ClonerPersistent (+10.77% UX)", Text = "Cutscene Interceptor & Identity Spoofing Active. Cmds: !help | !copy | !loadtarget | !bp", Duration = 8}) end);
+pc(function() SG:SetCore(vg, {Title = isPC and "PC Executor Engine Active" or "Mobile ClonerPersistent (+10.77% UX)", Text = "Physics Safe & Permissive Execution. Cmds: !help | !copy | !loadtarget | !bp", Duration = 8}) end);
