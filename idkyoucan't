@@ -9,40 +9,32 @@
             |___/                                                   |___/         |_|
 ]]--
 
-local getGlobalEnv = (type(getgenv) == "function" and getgenv()) or _G
+if getgenv().VynixuEntitySpawnerV2 then return getgenv().VynixuEntitySpawnerV2 end
 
-if getGlobalEnv.VynixuEntitySpawnerV2 then
-    return getGlobalEnv.VynixuEntitySpawnerV2
-end
-
-local UTILITY_SOURCE = "https://raw.githubusercontent.com/ngunhuchochet6/entitycustomhh/refs/heads/main/init.lua"
-
-local function FetchText(url)
-    local success, result = pcall(function()
-        if type(game.HttpGet) == "function" then return game:HttpGet(url) end
-        return game:GetService("HttpService"):GetAsync(url)
-    end)
-    if not success or type(result) ~= "string" or result == "" then
-        error("Failed to download utility source:\n" .. url .. "\nError: " .. tostring(result), 2)
+do
+    local UtilitySource = "https://raw.githubusercontent.com/ngunhuchochet6/entitycustomhh/refs/heads/main/init.lua"
+    local sourceLoader = loadstring
+    if type(sourceLoader) == "function" then
+        local ok, source = pcall(function()
+            return game:HttpGet(UtilitySource)
+        end)
+        if ok and type(source) == "string" then
+            local compiledOk, compiled = pcall(sourceLoader, source, "@EntitySpawnerUtility")
+            if compiledOk and type(compiled) == "function" then
+                local runOk, runErr = pcall(compiled)
+                if not runOk then
+                    warn("[EntitySpawner] Utility source failed: " .. tostring(runErr))
+                end
+            else
+                warn("[EntitySpawner] Utility source could not be compiled: " .. tostring(compiled))
+            end
+        else
+            warn("[EntitySpawner] Utility source could not be downloaded: " .. tostring(source))
+        end
+    else
+        warn("[EntitySpawner] loadstring is unavailable; utility source was not loaded.")
     end
-    return result
 end
-
-local function Compile(source, chunkName)
-    if type(loadstring) ~= "function" then error("loadstring is unavailable in this environment.", 2) end
-    local success, chunk, err = pcall(loadstring, source, chunkName)
-    if not success or type(chunk) ~= "function" then
-        error("Failed to compile " .. tostring(chunkName) .. ":\n" .. tostring(err or chunk), 2)
-    end
-    return chunk
-end
-
-local Utility = Compile(FetchText(UTILITY_SOURCE), "@EntitySpawnerUtility")()
-if type(Utility) ~= "table" then error("Utility source did not return a module table.", 2) end
-
-local LoadCustomAsset = Utility.LoadCustomAsset
-local LoadCustomInstance = Utility.LoadCustomInstance
-local Require = Utility.Require
 
 -- \\ Services // --
 
@@ -62,85 +54,107 @@ local Humanoid = Character:WaitForChild("Humanoid")
 local RootPart = Character.PrimaryPart or Character:FindFirstChildWhichIsA("BasePart", true)
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 local Camera = workspace.CurrentCamera
-local CameraConnection = workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
-    Camera = workspace.CurrentCamera
-end)
 
 local Remotes = ReplicatedStorage:WaitForChild("RemotesFolder") :: Folder
 local GameStats = ReplicatedStorage:WaitForChild("GameStats") :: Folder
 local CurrentRooms = workspace:WaitForChild("CurrentRooms") :: Folder
 
-local Assets = {
-    Repentance = LoadCustomInstance(ROOT .. "/Assets/Repentance.rbxm"),
-    Earthquake = LoadCustomInstance(ROOT .. "/Assets/Earthquake.rbxm")
-}
-
-if not Assets.Repentance then warn("[EntitySpawner] Repentance asset failed to load.") end
-if not Assets.Earthquake then warn("[EntitySpawner] Earthquake asset failed to load.") end
-local Modules = {
-    Module_Events = nil,
-    Main_Game = nil
-}
-
--- ModuleScripts are optional capabilities. Some execution contexts cannot
--- require game ModuleScripts; never let that prevent the entity core from loading.
-local function SafeRequireModule(moduleScript: Instance?)
-    if not moduleScript or not moduleScript:IsA("ModuleScript") then
-        return nil
+local function SafeRequire(moduleScript)
+    if typeof(moduleScript) ~= "Instance" or not moduleScript:IsA("ModuleScript") then
+        return nil, "ModuleScript unavailable"
     end
 
-    local success, result = pcall(require, moduleScript)
-    if success then
+    local ok, result = pcall(require, moduleScript)
+    if ok then
         return result
     end
 
-    warn("[EntitySpawner] Optional ModuleScript unavailable: " .. tostring(result))
-    return nil
+    return nil, tostring(result)
 end
 
-local function RefreshOptionalModules()
-    local modulesClient = ReplicatedStorage:FindFirstChild("ModulesClient")
-    if modulesClient then
-        Modules.Module_Events = SafeRequireModule(
-            modulesClient:FindFirstChild("Module_Events")
-        )
+local function RequireModule(path, label)
+    local current = PlayerGui
+    for _, name in ipairs(path) do
+        if not current then break end
+        current = current:FindFirstChild(name)
     end
 
-    local mainUI = PlayerGui:FindFirstChild("MainUI")
-    local initiator = mainUI and mainUI:FindFirstChild("Initiator")
-    if initiator then
-        Modules.Main_Game = SafeRequireModule(
-            initiator:FindFirstChild("Main_Game")
-        )
+    local result, err = SafeRequire(current)
+    if not result then
+        return nil, string.format("%s: %s", label or "Module", tostring(err))
     end
+    return result
 end
 
-local function TryModuleEvent(methodName: string, ...)
-    local events = Modules.Module_Events
-    local method = events and events[methodName]
+local Modules = {
+    Module_Events = nil,
+    Main_Game = nil,
+}
 
-    if typeof(method) ~= "function" then
+local function RefreshModules(force)
+    if force or Modules.Module_Events == nil then
+        local moduleScript = ReplicatedStorage:FindFirstChild("ModulesClient")
+            and ReplicatedStorage.ModulesClient:FindFirstChild("Module_Events")
+        local result = SafeRequire(moduleScript)
+        if result then
+            Modules.Module_Events = result
+        end
+    end
+
+    if force or Modules.Main_Game == nil then
+        local mainUI = PlayerGui:FindFirstChild("MainUI")
+        local initiator = mainUI and mainUI:FindFirstChild("Initiator")
+        local moduleScript = initiator and initiator:FindFirstChild("Main_Game")
+        local result = SafeRequire(moduleScript)
+        if result then
+            Modules.Main_Game = result
+        end
+    end
+
+    return Modules
+end
+
+local function RequiredModule(name)
+    -- Do not yield here: this function is also called from the entity movement loop.
+    -- A failed require is cached until RefreshModules(true) is explicitly requested.
+    RefreshModules(false)
+    return Modules[name]
+end
+
+local function TryModuleEvent(method, ...)
+    local events = RequiredModule("Module_Events")
+    if not events or type(events[method]) ~= "function" then
         return false
     end
 
-    local success = pcall(method, events, ...)
-    return success
+    local ok = pcall(events[method], ...)
+    return ok
 end
 
-local function TryCameraShake(...)
-    local mainGame = Modules.Main_Game
+local function TryCameraShake(method, ...)
+    local mainGame = RequiredModule("Main_Game")
     local shaker = mainGame and mainGame.camShaker
-
-    if not shaker or typeof(shaker.ShakeOnce) ~= "function" then
+    if not shaker or type(shaker[method]) ~= "function" then
         return false
     end
 
-    return pcall(function(...)
-        shaker:ShakeOnce(...)
-    end, ...)
+    local ok = pcall(shaker[method], shaker, ...)
+    return ok
 end
 
-RefreshOptionalModules()
+local Assets = {
+    Repentance = nil,
+    Earthquake = nil,
+}
+
+if type(LoadCustomInstance) == "function" then
+    local ok, result = pcall(LoadCustomInstance, ROOT.."/Assets/Repentance.rbxm")
+    if ok then Assets.Repentance = result end
+    ok, result = pcall(LoadCustomInstance, ROOT.."/Assets/Earthquake.rbxm")
+    if ok then Assets.Earthquake = result end
+end
+
+RefreshModules(false)
 local Storage = {
     Ambient = {},
 	DeathTypes = {
@@ -241,7 +255,6 @@ local CONST = {
 local Module = {
     ActiveEntities = {},
     Connections = {},
-    Loaded = true
 }
 
 -- \\ Functions // --
@@ -285,7 +298,7 @@ local function OnCharacterAdded(char: Model)
 	Humanoid = char:WaitForChild("Humanoid")
     RootPart = char.PrimaryPart or char:FindFirstChildWhichIsA("BasePart")
 
-    RefreshOptionalModules()
+    RefreshModules(true)
 end
 
 local function GetCurrentRoom(latest: boolean): Model?
@@ -386,6 +399,12 @@ local function HasEquipped(name: string): boolean
 end
 
 local function CrucifixEntity(entity: any)
+    if not Assets.Repentance or not Assets.Repentance:IsA("Model") then
+        warn("[EntitySpawner] Repentance asset unavailable; crucifix sequence skipped.")
+        entity.Model:SetAttribute("BeingBanished", false)
+        entity.Model:SetAttribute("Paused", false)
+        return
+    end
 	local model = entity.Model
 	local config = entity.Config
 
@@ -404,15 +423,12 @@ local function CrucifixEntity(entity: any)
     model:SetAttribute("BeingBanished", true)
 
     -- \\ Variables
-    RefreshOptionalModules()
-    local MainGame = Modules.Main_Game
+    local MainGame = RequiredModule("Main_Game")
     local CamShaker = MainGame and MainGame.camShaker
     local TheShake = nil
-    if CamShaker and typeof(CamShaker.StartShake) == "function" then
-        local shakeSuccess, shakeResult = pcall(function()
-            return CamShaker:StartShake(5, 20, 2, Vector3.zero)
-        end)
-        if shakeSuccess then
+    if CamShaker and type(CamShaker.StartShake) == "function" then
+        local shakeOk, shakeResult = pcall(CamShaker.StartShake, CamShaker, 5, 20, 2, Vector3.zero)
+        if shakeOk then
             TheShake = shakeResult
         end
     end
@@ -551,10 +567,8 @@ local function CrucifixEntity(entity: any)
                 { Brightness = 15, Range = 40 }
             ):Play()
 
-            if TheShake and typeof(TheShake.StartFadeOut) == "function" then
-                pcall(function()
-                    TheShake:StartFadeOut(3)
-                end)
+            if TheShake and type(TheShake.StartFadeOut) == "function" then
+                pcall(TheShake.StartFadeOut, TheShake, 3)
             end
             fadeOut()
 
@@ -608,10 +622,8 @@ local function CrucifixEntity(entity: any)
             { Brightness = 0, Range = 0, Color = Color3.fromRGB(255, 116, 130) }
         ):Play()
 		
-        if TheShake and typeof(TheShake.StartFadeOut) == "function" then
-            pcall(function()
-                TheShake:StartFadeOut(3)
-            end)
+        if TheShake and type(TheShake.StartFadeOut) == "function" then
+            pcall(TheShake.StartFadeOut, TheShake, 3)
         end
 
         -- \\ Fade pentagram to red
@@ -662,14 +674,9 @@ local function CrucifixEntity(entity: any)
     ):Play()
 
 	if not resist then
-        local explodeParticle = Handle:FindFirstChild("ExplodeParticle")
-        if explodeParticle and typeof(explodeParticle.Emit) == "function" then
-            explodeParticle:Emit(math.random(20, 30))
-        end
-        if CamShaker and typeof(CamShaker.ShakeOnce) == "function" then
-            pcall(function()
-                CamShaker:ShakeOnce(7.5, 7.5, 0.25, 1.5)
-            end)
+		Handle.ExplodeParticle:Emit(math.random(20, 30))
+        if CamShaker and type(CamShaker.ShakeOnce) == "function" then
+            pcall(CamShaker.ShakeOnce, CamShaker, 7.5, 7.5, 0.25, 1.5)
         end
 	else
 		model:SetAttribute("BeingBanished", false)
@@ -852,32 +859,39 @@ local function EntityMoveTo(model: Model, cframe: CFrame, speed: number)
 end
 
 local function Earthquake()
-    if not Assets.Earthquake then return end
-    TryCameraShake(4, 12, 1, 5)
-    TryCameraShake(10, 2, 3, 3)
-    local sound = Assets.Earthquake:FindFirstChild("SoundEarthquake")
-    if sound and sound:IsA("Sound") then sound:Play() end
-    local particles = Assets.Earthquake:FindFirstChild("Particles")
-    if not particles then return end
-    local spawned = {}
-    for _, ceilingPart in ipairs(CollectionService:GetTagged("PartCeiling")) do
-        local amount = math.clamp(ceilingPart.Size.Magnitude * 0.7, 0, 150)
-        for _, template in ipairs(particles:GetChildren()) do
-            if template:IsA("ParticleEmitter") then
-                local emitter = template:Clone()
-                emitter.Parent = ceilingPart
-                emitter:Emit(amount / 10)
-                emitter.Enabled = true
-                spawned[#spawned + 1] = emitter
-            end
+    TryCameraShake("ShakeOnce", 4, 12, 1, 5)
+    TryCameraShake("ShakeOnce", 10, 2, 3, 3)
+
+    if not Assets.Earthquake then
+        return
+    end
+
+    local earthquakeSound = Assets.Earthquake:FindFirstChild("SoundEarthquake")
+    if earthquakeSound and earthquakeSound:IsA("Sound") then
+        earthquakeSound:Play()
+    end
+    local v5 = CollectionService:GetTagged("PartCeiling")
+    local v6 = {}
+    for _, v7 in v5 do
+        local v8 = v7.Size.Magnitude * 0.7
+        local v9 = math.clamp(v8, 0, 150)
+        local particles = Assets.Earthquake:FindFirstChild("Particles")
+        if not particles then
+            continue
+        end
+        for _, v10 in particles:GetChildren() do
+            local v11 = v10:Clone()
+            v11.Parent = v7
+            v11:Emit(v9 / 10)
+            v11.Enabled = true
+            table.insert(v6, v11)
         end
     end
     task.wait(4)
-    for _, emitter in ipairs(spawned) do
-        if emitter.Parent then emitter.Enabled = false end
+    for _, v12 in v6 do
+        v12.Enabled = false
     end
 end
-
 
 -- \\ Setup // --
 
@@ -1188,7 +1202,7 @@ Module.Run = function(self, entity: any, copyEntity: boolean)
 
                         cloned[1] = camShake.Values[1] / camShake.Range * (camShake.Range - mag) -- Magnitude
                         cloned[2] = camShake.Values[2] / camShake.Range * (camShake.Range - mag) -- Roughness
-                        TryCameraShake(table.unpack(cloned))
+                        TryCameraShake("ShakeOnce", table.unpack(cloned))
                     end
                 end
             end
@@ -1318,8 +1332,8 @@ Module.Run = function(self, entity: any, copyEntity: boolean)
     end)
 end
 
-if not getGlobalEnv._internal_vynixu_entity_spawner then
-	getGlobalEnv._internal_vynixu_entity_spawner = true
+if not getgenv()._internal_vynixu_entity_spawner then
+	getgenv()._internal_vynixu_entity_spawner = true
 
 	local function GetAmbient(room: Model): Color3
 		return
@@ -1343,28 +1357,35 @@ if not getGlobalEnv._internal_vynixu_entity_spawner then
                 instance:Clone().Parent = latestRoom
             end
         end
-	end))
+	end)
 end
 
 Module.Clear = function(self)
     local active = table.clone(self.ActiveEntities)
-    for _, entity in ipairs(active) do
-        if entity and entity.IsAlive and entity:IsAlive() then entity:Despawn() end
+    for _, entity in next, active do
+        if entity and entity.IsAlive and entity:IsAlive() then
+            entity:Despawn()
+        end
     end
     table.clear(self.ActiveEntities)
 end
 
 Module.Unload = function(self)
-    if not self.Loaded then return end
     self:Clear()
-    for i, connection in ipairs(self.Connections) do
-        if connection and connection.Connected then connection:Disconnect() end
+    for i, connection in next, self.Connections do
+        if connection then
+            pcall(function() connection:Disconnect() end)
+        end
         self.Connections[i] = nil
     end
-    if CameraConnection and CameraConnection.Connected then CameraConnection:Disconnect() end
-    self.Loaded = false
-    if getGlobalEnv.VynixuEntitySpawnerV2 == self then getGlobalEnv.VynixuEntitySpawnerV2 = nil end
+
+    if type(getgenv) == "function" then
+        local env = getgenv()
+        if env.VynixuEntitySpawnerV2 == self then
+            env.VynixuEntitySpawnerV2 = nil
+        end
+    end
 end
 
-getGlobalEnv.VynixuEntitySpawnerV2 = Module
+getgenv().VynixuEntitySpawnerV2 = Module
 return Module
