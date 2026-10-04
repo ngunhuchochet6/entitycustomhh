@@ -1,315 +1,577 @@
--- Additional help: @ActualMasterOogway (Remastered for Cross-Platform, Update Resilience & Debugging)
+--[[
+    Utility Module
+    Reworked for compatibility / capability detection.
 
--- \\ Services // --
+    Original helper:
+        @ActualMasterOogway
+
+    Notes:
+        - Does not assume executor-specific APIs exist.
+        - Uses GetProductInfoAsync when available.
+        - Keeps compatibility with older environments where possible.
+        - Filesystem/custom-asset features gracefully report missing capabilities.
+]]
+
+--// Services //--
+
 local MarketplaceService = game:GetService("MarketplaceService")
 local HttpService = game:GetService("HttpService")
 
--- \\ Executor Function Fallbacks // --
--- Ensures compatibility with strict sandboxes on Mobile and PC
-local req = (request or http and http.request or http_request)
-local is_file = isfile or function() return false end
-local read_file = readfile or function() return "" end
-local write_file = writefile or function() end
-local del_file = delfile or function() end
-local get_custom_asset = getcustomasset or getsynasset
+--// Module //--
 
--- \\ Variables // --
 local Module = {}
 
--- \\ Helper Functions // --
+--// Capability Helpers //--
 
--- Universal HTTP Get that works even if game:HttpGet is blocked/patched
-local function SafeHttpGet(url: string): string
-    local success, result = pcall(function()
-        if type(game.HttpGet) == "function" then
+local function hasGlobal(name)
+    return type(getfenv) == "function" and getfenv()[name] ~= nil
+        or _G[name] ~= nil
+end
+
+local function getGlobal(name)
+    local value
+
+    pcall(function()
+        if type(getfenv) == "function" then
+            value = getfenv()[name]
+        end
+    end)
+
+    if value == nil then
+        value = _G[name]
+    end
+
+    return value
+end
+
+local function isCallable(value)
+    return type(value) == "function"
+end
+
+local function isString(value)
+    return type(value) == "string"
+end
+
+local function isNumber(value)
+    return type(value) == "number"
+end
+
+local function isHttpUrl(value)
+    return isString(value)
+        and value:lower():match("^https?://") ~= nil
+end
+
+local function getFileApi()
+    return {
+        isfile = getGlobal("isfile"),
+        readfile = getGlobal("readfile"),
+        writefile = getGlobal("writefile"),
+        delfile = getGlobal("delfile"),
+    }
+end
+
+local function httpGet(url)
+    if not isHttpUrl(url) then
+        return nil, "Invalid HTTP URL"
+    end
+
+    -- Executor-provided game:HttpGet
+    local gameHttpGet
+
+    pcall(function()
+        gameHttpGet = game.HttpGet
+    end)
+
+    if isCallable(gameHttpGet) then
+        local success, result = pcall(function()
             return game:HttpGet(url)
-        elseif req then
-            local response = req({Url = url, Method = "GET"})
-            if response.Success then return response.Body end
+        end)
+
+        if success and isString(result) then
+            return result
         end
-        error("No valid HTTP function found")
+    end
+
+    -- Standard Roblox HttpService fallback.
+    local success, result = pcall(function()
+        return HttpService:GetAsync(url)
     end)
-    if not success then error("HTTP Request failed for: " .. url .. "\nError: " .. tostring(result)) end
+
+    if success and isString(result) then
+        return result
+    end
+
+    return nil, tostring(result)
+end
+
+--// Timestamp //--
+
+local function timestampToMillis(timestamp)
+    local valueType = typeof(timestamp)
+
+    if valueType == "DateTime" then
+        return timestamp.UnixTimestampMillis
+    end
+
+    if valueType == "number" then
+        return timestamp
+    end
+
+    if valueType == "string" then
+        local success, result = pcall(function()
+            return DateTime.fromIsoDate(timestamp).UnixTimestampMillis
+        end)
+
+        if success then
+            return result
+        end
+    end
+
+    return nil
+end
+
+--// Require //--
+
+Module.Require = function(source)
+    assert(
+        isString(source),
+        "Module.Require expected a string"
+    )
+
+    local content = source
+
+    -- Remote source
+    if isHttpUrl(source) then
+        local result, err = httpGet(source)
+
+        if not result then
+            error(
+                "Failed to download module:\n"
+                .. source
+                .. "\nError: "
+                .. tostring(err),
+                2
+            )
+        end
+
+        content = result
+
+    -- Local file
+    else
+        local fs = getFileApi()
+
+        if isCallable(fs.isfile)
+            and isCallable(fs.readfile)
+            and fs.isfile(source)
+        then
+            local success, result = pcall(function()
+                return fs.readfile(source)
+            end)
+
+            if not success then
+                error(
+                    "Failed to read module file:\n"
+                    .. source
+                    .. "\nError: "
+                    .. tostring(result),
+                    2
+                )
+            end
+
+            content = result
+        end
+    end
+
+    local loader = getGlobal("loadstring")
+
+    if not isCallable(loader) then
+        loader = loadstring
+    end
+
+    if not isCallable(loader) then
+        error(
+            "loadstring is unavailable in this environment.",
+            2
+        )
+    end
+
+    local success, func, err = pcall(function()
+        return loader(
+            content,
+            "@" .. tostring(source)
+        )
+    end)
+
+    if not success then
+        error(
+            "Failed to compile module:\n"
+            .. tostring(source)
+            .. "\nError: "
+            .. tostring(func),
+            2
+        )
+    end
+
+    if not func then
+        error(
+            "Failed to compile module:\n"
+            .. tostring(source)
+            .. "\nError: "
+            .. tostring(err),
+            2
+        )
+    end
+
+    local executed, result = pcall(func)
+
+    if not executed then
+        error(
+            "Failed to execute module:\n"
+            .. tostring(source)
+            .. "\nError: "
+            .. tostring(result),
+            2
+        )
+    end
+
     return result
 end
 
--- Safely converts timestamps, preventing crashes on invalid strings
-local function timestampToMillis(timestamp: any): number
-    if type(timestamp) == "number" then return timestamp end
-    if type(timestamp) == "string" then
-        local dt = DateTime.fromIsoDate(timestamp)
-        return dt and dt.UnixTimestampMillis or 0
-    end
-    if typeof(timestamp) == "DateTime" then
-        return timestamp.UnixTimestampMillis
-    end
-    return 0
-end
+--// Load Custom Asset //--
 
--- \\ Main Module // --
+Module.LoadCustomAsset = function(url)
+    assert(
+        isString(url),
+        "LoadCustomAsset expected a string"
+    )
 
-Module.Require = function(s: string): any?
-    local content = s
-    if s:lower():sub(1, 4) == "http" then
-        content = SafeHttpGet(s)
-    elseif is_file(s) then
-        content = read_file(s)
-    end
+    local customAsset = getGlobal("getcustomasset")
 
-    -- 1. Check for syntax errors when loading
-    local func, err = loadstring(content, s) -- Passes the URL/Path as the chunk name for better error logs
-    if not func then
-        error(debug.traceback("Syntax Error in loaded module:\n" .. s .. "\nError: " .. tostring(err)))
-    end
-    
-    -- 2. Catch RUNTIME errors (like the "missing method 'create'" error) and force a full trace
-    local success, result = xpcall(func, function(runtimeErr)
-        return "[RUNTIME ERROR] inside loaded module: " .. s .. "\n" .. 
-               "Message: " .. tostring(runtimeErr) .. "\n" .. 
-               "Traceback: \n" .. debug.traceback()
-    end)
-    
-    if not success then
-        error(result) -- This will print EXACTLY what script and line is failing
-    end
-    
-    return result
-end
+    -- Executor custom asset support
+    if isCallable(customAsset) then
 
-Module.LoadCustomAsset = function(url: string): string?
-    if get_custom_asset then
-        if url:lower():sub(1, 4) == "http" then
-            -- Fix for Mobile: Files must have valid extensions for custom assets to render properly
-            local extension = url:match("%.(%w+)$") or url:match("%.(%w+)%?") or "bin"
-            local fileName = `temp_{HttpService:GenerateGUID(false)}.{extension}`
-            
-            local success, result = pcall(function()
-                write_file(fileName, SafeHttpGet(url))
-                return get_custom_asset(fileName, true)
-            end)
-            
-            -- Cleanup
-            if is_file(fileName) then
-                pcall(del_file, fileName)
+        -- Remote asset
+        if isHttpUrl(url) then
+            local fs = getFileApi()
+
+            if not (
+                isCallable(fs.writefile)
+                and isCallable(fs.isfile)
+            ) then
+                warn(
+                    "getcustomasset exists, but filesystem APIs "
+                    .. "needed for remote assets are unavailable."
+                )
+            else
+                local fileName =
+                    "temp_asset_" ..
+                    tostring(math.floor(os.clock() * 1000000)) ..
+                    ".tmp"
+
+                local content, err = httpGet(url)
+
+                if not content then
+                    error(
+                        "Failed to download custom asset:\n"
+                        .. url
+                        .. "\nError: "
+                        .. tostring(err),
+                        2
+                    )
+                end
+
+                local success, result = pcall(function()
+                    fs.writefile(fileName, content)
+                    return customAsset(fileName, true)
+                end)
+
+                if isCallable(fs.isfile)
+                    and fs.isfile(fileName)
+                    and isCallable(fs.delfile)
+                then
+                    pcall(function()
+                        fs.delfile(fileName)
+                    end)
+                end
+
+                if success and result then
+                    return result
+                end
+
+                warn(
+                    "getcustomasset failed for:\n"
+                    .. url
+                )
             end
-            
-            if success and result then return result end
-        elseif is_file(url) then
-            local success, result = pcall(get_custom_asset, url, true)
-            if success and result then return result end
+
+        -- Existing local file
+        else
+            local fs = getFileApi()
+
+            if isCallable(fs.isfile)
+                and fs.isfile(url)
+            then
+                local success, result = pcall(function()
+                    return customAsset(url, true)
+                end)
+
+                if success and result then
+                    return result
+                end
+            end
         end
-    else
-        warn("[Warning]: Executor lacks 'getcustomasset'. Defaulting to rbxassetid.")
     end
-    
-    -- Fallback to asset id
-    if url:find("rbxassetid") or tonumber(url) then
-        return "rbxassetid://" .. url:match("%d+")
+
+    -- Standard Roblox asset ID fallback
+    local assetId = url:match("rbxassetid://(%d+)")
+        or url:match("(%d+)")
+
+    if assetId then
+        return "rbxassetid://" .. assetId
     end
-    
-    warn("[Warning]: Failed to load custom asset, returning empty string to prevent crash.")
-    return ""
+
+    error(
+        "Unable to load custom asset:\n"
+        .. tostring(url)
+        .. "\nNo compatible asset loader was found.",
+        2
+    )
 end
 
-Module.LoadCustomInstance = function(url: string): Instance?
-    -- Note: game:GetObjects() is frequently patched by Roblox. Pcall is mandatory here.
+--// Load Custom Instance //--
+
+Module.LoadCustomInstance = function(url)
     local success, result = pcall(function()
         local asset = Module.LoadCustomAsset(url)
-        if asset and asset ~= "" then
-            return game:GetObjects(asset)[1]
+
+        local objects = game:GetObjects(asset)
+
+        if type(objects) ~= "table" then
+            return nil
         end
+
+        return objects[1]
     end)
+
+    if success then
+        return result
+    end
+
+    warn(
+        "LoadCustomInstance failed:\n"
+        .. tostring(result)
+    )
+
+    return nil
+end
+
+--// Game Update //--
+
+Module.GetGameLastUpdate = function()
+    local success, info = pcall(function()
+        -- Prefer modern API
+        if MarketplaceService.GetProductInfoAsync then
+            return MarketplaceService:GetProductInfoAsync(
+                game.PlaceId
+            )
+        end
+
+        -- Compatibility fallback
+        return MarketplaceService:GetProductInfo(
+            game.PlaceId
+        )
+    end)
+
+    if not success or type(info) ~= "table" then
+        error(
+            "Failed to retrieve game information:\n"
+            .. tostring(info),
+            2
+        )
+    end
+
+    if not info.Updated then
+        error(
+            "Game information does not contain an Updated timestamp.",
+            2
+        )
+    end
+
+    local successDate, date = pcall(function()
+        return DateTime.fromIsoDate(info.Updated)
+    end)
+
+    if not successDate then
+        error(
+            "Failed to parse game Updated timestamp:\n"
+            .. tostring(date),
+            2
+        )
+    end
+
+    return date
+end
+
+Module.HasGameUpdated = function(timestamp)
+    local millis = timestampToMillis(timestamp)
+
+    if not millis then
+        return false
+    end
+
+    local success, lastUpdate = pcall(
+        Module.GetGameLastUpdate
+    )
+
+    if not success or not lastUpdate then
+        return false
+    end
+
+    return millis < lastUpdate.UnixTimestampMillis
+end
+
+--// GitHub Update //--
+
+Module.GetGitLastUpdate = function(owner, repo, filePath)
+    assert(
+        isString(owner) and owner ~= "",
+        "owner must be a non-empty string"
+    )
+
+    assert(
+        isString(repo) and repo ~= "",
+        "repo must be a non-empty string"
+    )
+
+    assert(
+        isString(filePath) and filePath ~= "",
+        "filePath must be a non-empty string"
+    )
+
+    local url =
+        "https://api.github.com/repos/"
+        .. owner
+        .. "/"
+        .. repo
+        .. "/commits?per_page=1&path="
+        .. HttpService:UrlEncode(filePath)
+
+    local body, err = httpGet(url)
+
+    if not body then
+        error(
+            "Failed to get GitHub commit:\n"
+            .. url
+            .. "\nError: "
+            .. tostring(err),
+            2
+        )
+    end
+
+    local success, result = pcall(function()
+        return HttpService:JSONDecode(body)
+    end)
+
     if not success then
-        warn("[Warning]: game:GetObjects failed. This is likely patched by Roblox or unsupported by your executor.")
+        error(
+            "Failed to decode GitHub response:\n"
+            .. tostring(result),
+            2
+        )
     end
-    return success and result or nil
-end
 
-Module.GetGameLastUpdate = function(): DateTime
-    -- Added pcall because MarketplaceService yields and can fail if Roblox API is down
-    local success, result = pcall(function()
-        return MarketplaceService:GetProductInfo(game.PlaceId).Updated
+    if type(result) ~= "table"
+        or type(result[1]) ~= "table"
+        or type(result[1].commit) ~= "table"
+        or type(result[1].commit.committer) ~= "table"
+        or not result[1].commit.committer.date
+    then
+        error(
+            "GitHub returned an unexpected response for:\n"
+            .. url,
+            2
+        )
+    end
+
+    local dateString =
+        result[1].commit.committer.date
+
+    local successDate, date = pcall(function()
+        return DateTime.fromIsoDate(dateString)
     end)
-    return success and DateTime.fromIsoDate(result) or DateTime.now()
-end
 
-Module.HasGameUpdated = function(timestamp: any): boolean
-    local millis = timestampToMillis(timestamp)
-    if millis > 0 then
-        return millis < Module.GetGameLastUpdate().UnixTimestampMillis
+    if not successDate then
+        error(
+            "Failed to parse GitHub timestamp:\n"
+            .. tostring(date),
+            2
+        )
     end
-    return false
+
+    return date
 end
 
-Module.GetGitLastUpdate = function(owner: string, repo: string, filePath: string): DateTime
-    local url = `https://api.github.com/repos/{owner}/{repo}/commits?per_page=1&path={filePath}`
-    
-    -- Fix for GitHub API Rate Limiting (60 requests/hr).
-    local success, result = pcall(function()
-        return HttpService:JSONDecode(SafeHttpGet(url))
+Module.HasGitUpdated = function(
+    owner,
+    repo,
+    filePath,
+    timestamp
+)
+    local millis = timestampToMillis(timestamp)
+
+    if not millis then
+        return false
+    end
+
+    local success, lastUpdate = pcall(function()
+        return Module.GetGitLastUpdate(
+            owner,
+            repo,
+            filePath
+        )
     end)
-    
-    if success and type(result) == "table" and result[1] and result[1].commit then
-        return DateTime.fromIsoDate(result[1].commit.committer.date)
-    else
-        warn(`[Warning]: Failed to fetch Git update. You are likely rate-limited by GitHub API.`)
-        return DateTime.now() -- Returns current time to prevent crashes
+
+    if not success or not lastUpdate then
+        return false
     end
+
+    return millis < lastUpdate.UnixTimestampMillis
 end
 
-Module.HasGitUpdated = function(owner: string, repo: string, filePath: string, timestamp: any): boolean
-    local millis = timestampToMillis(timestamp)
-    if millis > 0 then
-        return millis < Module.GetGitLastUpdate(owner, repo, filePath).UnixTimestampMillis
-    end
-    return false
+--// Number Utilities //--
+
+Module.TruncateNumber = function(
+    num,
+    decimals
+)
+    assert(
+        isNumber(num),
+        "num must be a number"
+    )
+
+    decimals = isNumber(decimals)
+        and math.max(0, math.floor(decimals))
+        or 0
+
+    local multiplier = 10 ^ decimals
+
+    return math.floor(num * multiplier)
+        / multiplier
 end
 
-Module.TruncateNumber = function(num: number, decimals: number): number
-    local shift = 10 ^ (decimals and math.max(decimals, 0) or 0)
-    return math.floor(num * shift) / shift
-end
+--// Optional Global Export //--
 
--- \\ Global Implementation // --
+local getgenvFunction = getGlobal("getgenv")
 
-local genv = getgenv and getgenv() or _G
-for name, func in next, Module do
-    if type(func) == "function" then
-        genv[name] = func
-    end
-end
+if isCallable(getgenvFunction) then
+    local success, globalEnv = pcall(getgenvFunction)
 
-return Modulelocal function timestampToMillis(timestamp: any): number
-    if type(timestamp) == "number" then return timestamp end
-    if type(timestamp) == "string" then
-        local dt = DateTime.fromIsoDate(timestamp)
-        return dt and dt.UnixTimestampMillis or 0
-    end
-    if typeof(timestamp) == "DateTime" then
-        return timestamp.UnixTimestampMillis
-    end
-    return 0
-end
-
--- \\ Main Module // --
-
-Module.Require = function(s: string): any?
-    local content = s
-    if s:lower():sub(1, 4) == "http" then
-        content = SafeHttpGet(s)
-    elseif is_file(s) then
-        content = read_file(s)
-    end
-
-    local func, err = loadstring(content)
-    if not func then
-        error(debug.traceback("Failed to load module:\n" .. s .. "\nError: " .. tostring(err)))
-    end
-    return func()
-end
-
-Module.LoadCustomAsset = function(url: string): string?
-    if get_custom_asset then
-        if url:lower():sub(1, 4) == "http" then
-            -- Fix for Mobile: Files must have valid extensions (not .txt) for custom assets to render properly
-            local extension = url:match("%.(%w+)$") or url:match("%.(%w+)%?") or "bin"
-            local fileName = `temp_{HttpService:GenerateGUID(false)}.{extension}`
-            
-            local success, result = pcall(function()
-                write_file(fileName, SafeHttpGet(url))
-                return get_custom_asset(fileName, true)
-            end)
-            
-            -- Cleanup
-            if is_file(fileName) then
-                pcall(del_file, fileName)
+    if success and type(globalEnv) == "table" then
+        for name, value in pairs(Module) do
+            if type(value) == "function" then
+                globalEnv[name] = value
             end
-            
-            if success and result then return result end
-        elseif is_file(url) then
-            local success, result = pcall(get_custom_asset, url, true)
-            if success and result then return result end
         end
-    else
-        warn("[Warning]: Executor lacks 'getcustomasset'. Defaulting to rbxassetid.")
-    end
-    
-    -- Fallback to asset id
-    if url:find("rbxassetid") or tonumber(url) then
-        return "rbxassetid://" .. url:match("%d+")
-    end
-    
-    warn("[Warning]: Failed to load custom asset, returning empty string to prevent crash.")
-    return ""
-end
-
-Module.LoadCustomInstance = function(url: string): Instance?
-    -- Note: game:GetObjects() is frequently patched by Roblox. 
-    -- Pcall is mandatory here to prevent execution halting.
-    local success, result = pcall(function()
-        local asset = Module.LoadCustomAsset(url)
-        if asset and asset ~= "" then
-            return game:GetObjects(asset)[1]
-        end
-    end)
-    if not success then
-        warn("[Warning]: game:GetObjects failed. This is likely patched by Roblox or unsupported by your executor.")
-    end
-    return success and result or nil
-end
-
-Module.GetGameLastUpdate = function(): DateTime
-    -- Added pcall because MarketplaceService yields and can fail if Roblox API is down
-    local success, result = pcall(function()
-        return MarketplaceService:GetProductInfo(game.PlaceId).Updated
-    end)
-    return success and DateTime.fromIsoDate(result) or DateTime.now()
-end
-
-Module.HasGameUpdated = function(timestamp: any): boolean
-    local millis = timestampToMillis(timestamp)
-    if millis > 0 then
-        return millis < Module.GetGameLastUpdate().UnixTimestampMillis
-    end
-    return false
-end
-
-Module.GetGitLastUpdate = function(owner: string, repo: string, filePath: string): DateTime
-    local url = `https://api.github.com/repos/{owner}/{repo}/commits?per_page=1&path={filePath}`
-    
-    -- Fix for GitHub API Rate Limiting (60 requests/hr). 
-    -- Without this check, result[1] throws a nil error and breaks the script.
-    local success, result = pcall(function()
-        return HttpService:JSONDecode(SafeHttpGet(url))
-    end)
-    
-    if success and type(result) == "table" and result[1] and result[1].commit then
-        return DateTime.fromIsoDate(result[1].commit.committer.date)
-    else
-        warn(`[Warning]: Failed to fetch Git update. You are likely rate-limited by GitHub API. Url: {url}`)
-        return DateTime.now() -- Returns current time to prevent crashes
-    end
-end
-
-Module.HasGitUpdated = function(owner: string, repo: string, filePath: string, timestamp: any): boolean
-    local millis = timestampToMillis(timestamp)
-    if millis > 0 then
-        return millis < Module.GetGitLastUpdate(owner, repo, filePath).UnixTimestampMillis
-    end
-    return false
-end
-
-Module.TruncateNumber = function(num: number, decimals: number): number
-    local shift = 10 ^ (decimals and math.max(decimals, 0) or 0)
-    return math.floor(num * shift) / shift
-end
-
--- \\ Global Implementation // --
-
-local genv = getgenv and getgenv() or _G
-for name, func in next, Module do
-    if type(func) == "function" then
-        genv[name] = func
     end
 end
 
