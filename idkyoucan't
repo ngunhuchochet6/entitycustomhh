@@ -714,9 +714,18 @@ local function DamagePlayer(entity: any)
                 end
             end
             if not colour then
-                for _, c in next, PlayerGui.MainUI.Initiator.Main_Game.Health.Music:GetChildren() do
-                    if c.Name:lower() == config.Death.Type:lower() then
-                        colour = c.Name
+                local mainUI = PlayerGui:FindFirstChild("MainUI")
+                local initiator = mainUI and mainUI:FindFirstChild("Initiator")
+                local mainGameModule = initiator and initiator:FindFirstChild("Main_Game")
+                local health = mainGameModule and mainGameModule:FindFirstChild("Health")
+                local music = health and health:FindFirstChild("Music")
+
+                if music then
+                    for _, c in next, music:GetChildren() do
+                        if c.Name:lower() == config.Death.Type:lower() then
+                            colour = c.Name
+                            break
+                        end
                     end
                 end
             end
@@ -907,7 +916,7 @@ table.insert(Module.Connections, LocalPlayer.CharacterAdded:Connect(OnCharacterA
 
 Module.Create = function(self, config: any): any?
     local newConfig = ApplyConfigDefaults(config, CONST.DEFAULT.CONFIG)
-    newConfig.Movement.Speed = CONST.BASE_ENTITY_SPEED / 100 * config.Movement.Speed
+    newConfig.Movement.Speed = CONST.BASE_ENTITY_SPEED / 100 * newConfig.Movement.Speed
 
     -- Fetch entity model
     local asset = newConfig.Entity.Asset
