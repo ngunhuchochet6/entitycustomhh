@@ -78,9 +78,69 @@ local Assets = {
 if not Assets.Repentance then warn("[EntitySpawner] Repentance asset failed to load.") end
 if not Assets.Earthquake then warn("[EntitySpawner] Earthquake asset failed to load.") end
 local Modules = {
-	Module_Events = require(ReplicatedStorage.ModulesClient.Module_Events :: ModuleScript),
-	Main_Game = require(PlayerGui.MainUI.Initiator.Main_Game :: ModuleScript)
+    Module_Events = nil,
+    Main_Game = nil
 }
+
+-- ModuleScripts are optional capabilities. Some execution contexts cannot
+-- require game ModuleScripts; never let that prevent the entity core from loading.
+local function SafeRequireModule(moduleScript: Instance?)
+    if not moduleScript or not moduleScript:IsA("ModuleScript") then
+        return nil
+    end
+
+    local success, result = pcall(require, moduleScript)
+    if success then
+        return result
+    end
+
+    warn("[EntitySpawner] Optional ModuleScript unavailable: " .. tostring(result))
+    return nil
+end
+
+local function RefreshOptionalModules()
+    local modulesClient = ReplicatedStorage:FindFirstChild("ModulesClient")
+    if modulesClient then
+        Modules.Module_Events = SafeRequireModule(
+            modulesClient:FindFirstChild("Module_Events")
+        )
+    end
+
+    local mainUI = PlayerGui:FindFirstChild("MainUI")
+    local initiator = mainUI and mainUI:FindFirstChild("Initiator")
+    if initiator then
+        Modules.Main_Game = SafeRequireModule(
+            initiator:FindFirstChild("Main_Game")
+        )
+    end
+end
+
+local function TryModuleEvent(methodName: string, ...)
+    local events = Modules.Module_Events
+    local method = events and events[methodName]
+
+    if typeof(method) ~= "function" then
+        return false
+    end
+
+    local success = pcall(method, events, ...)
+    return success
+end
+
+local function TryCameraShake(...)
+    local mainGame = Modules.Main_Game
+    local shaker = mainGame and mainGame.camShaker
+
+    if not shaker or typeof(shaker.ShakeOnce) ~= "function" then
+        return false
+    end
+
+    return pcall(function(...)
+        shaker:ShakeOnce(...)
+    end, ...)
+end
+
+RefreshOptionalModules()
 local Storage = {
     Ambient = {},
 	DeathTypes = {
@@ -225,7 +285,7 @@ local function OnCharacterAdded(char: Model)
 	Humanoid = char:WaitForChild("Humanoid")
     RootPart = char.PrimaryPart or char:FindFirstChildWhichIsA("BasePart")
 
-    Modules.Main_Game = require(PlayerGui:WaitForChild("MainUI").Initiator.Main_Game :: ModuleScript)
+    RefreshOptionalModules()
 end
 
 local function GetCurrentRoom(latest: boolean): Model?
@@ -274,7 +334,7 @@ local function FixRoomLights(room: Model)
     end
     
     -- Set room ambient
-    Modules.Module_Events.toggle(room, true, Storage.Ambient[room])
+    TryModuleEvent("toggle", room, true, Storage.Ambient[room])
 
     -- Fix lights
     local stuff = {}
@@ -344,9 +404,18 @@ local function CrucifixEntity(entity: any)
     model:SetAttribute("BeingBanished", true)
 
     -- \\ Variables
-    local MainGame = require(PlayerGui.MainUI.Initiator.Main_Game :: ModuleScript)
-    local CamShaker = MainGame.camShaker
-	local TheShake = CamShaker:StartShake(5, 20, 2, Vector3.zero)
+    RefreshOptionalModules()
+    local MainGame = Modules.Main_Game
+    local CamShaker = MainGame and MainGame.camShaker
+    local TheShake = nil
+    if CamShaker and typeof(CamShaker.StartShake) == "function" then
+        local shakeSuccess, shakeResult = pcall(function()
+            return CamShaker:StartShake(5, 20, 2, Vector3.zero)
+        end)
+        if shakeSuccess then
+            TheShake = shakeResult
+        end
+    end
 
 	local Repentance = Assets.Repentance:Clone()
 	local Crucifix = Repentance.Crucifix
@@ -482,7 +551,11 @@ local function CrucifixEntity(entity: any)
                 { Brightness = 15, Range = 40 }
             ):Play()
 
-            TheShake:StartFadeOut(3)
+            if TheShake and typeof(TheShake.StartFadeOut) == "function" then
+                pcall(function()
+                    TheShake:StartFadeOut(3)
+                end)
+            end
             fadeOut()
 
             TweenService:Create(
@@ -535,7 +608,11 @@ local function CrucifixEntity(entity: any)
             { Brightness = 0, Range = 0, Color = Color3.fromRGB(255, 116, 130) }
         ):Play()
 		
-        TheShake:StartFadeOut(3)
+        if TheShake and typeof(TheShake.StartFadeOut) == "function" then
+            pcall(function()
+                TheShake:StartFadeOut(3)
+            end)
+        end
 
         -- \\ Fade pentagram to red
 		task.spawn(function()
@@ -585,8 +662,15 @@ local function CrucifixEntity(entity: any)
     ):Play()
 
 	if not resist then
-		Handle.ExplodeParticle:Emit(math.random(20, 30))
-		CamShaker:ShakeOnce(7.5, 7.5, 0.25, 1.5)
+        local explodeParticle = Handle:FindFirstChild("ExplodeParticle")
+        if explodeParticle and typeof(explodeParticle.Emit) == "function" then
+            explodeParticle:Emit(math.random(20, 30))
+        end
+        if CamShaker and typeof(CamShaker.ShakeOnce) == "function" then
+            pcall(function()
+                CamShaker:ShakeOnce(7.5, 7.5, 0.25, 1.5)
+            end)
+        end
 	else
 		model:SetAttribute("BeingBanished", false)
 		model:SetAttribute("Paused", false)
@@ -769,10 +853,8 @@ end
 
 local function Earthquake()
     if not Assets.Earthquake then return end
-    if Modules.Main_Game and Modules.Main_Game.camShaker then
-        Modules.Main_Game.camShaker:ShakeOnce(4, 12, 1, 5)
-        Modules.Main_Game.camShaker:ShakeOnce(10, 2, 3, 3)
-    end
+    TryCameraShake(4, 12, 1, 5)
+    TryCameraShake(10, 2, 3, 3)
     local sound = Assets.Earthquake:FindFirstChild("SoundEarthquake")
     if sound and sound:IsA("Sound") then sound:Play() end
     local particles = Assets.Earthquake:FindFirstChild("Particles")
@@ -971,7 +1053,7 @@ Module.Run = function(self, entity: any, copyEntity: boolean)
     if currentRoom then
         -- Flickering lights
         if config.Lights.Flicker.Enabled then
-            Modules.Module_Events.flicker(currentRoom, config.Lights.Flicker.Duration)
+            TryModuleEvent("flicker", currentRoom, config.Lights.Flicker.Duration)
         end
 
         -- Earthquake
@@ -1037,7 +1119,7 @@ Module.Run = function(self, entity: any, copyEntity: boolean)
                             local latestRoom = GetCurrentRoom(true)
                             if room ~= latestRoom then
                                 if config.Lights.Shatter then
-                                    Modules.Module_Events.shatter(room)
+                                    TryModuleEvent("shatter", room)
                                 elseif config.Lights.Repair then
                                     FixRoomLights(room)
                                 end
@@ -1106,7 +1188,7 @@ Module.Run = function(self, entity: any, copyEntity: boolean)
 
                         cloned[1] = camShake.Values[1] / camShake.Range * (camShake.Range - mag) -- Magnitude
                         cloned[2] = camShake.Values[2] / camShake.Range * (camShake.Range - mag) -- Roughness
-                        Modules.Main_Game.camShaker:ShakeOnce(table.unpack(cloned))
+                        TryCameraShake(table.unpack(cloned))
                     end
                 end
             end
