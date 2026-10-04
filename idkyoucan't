@@ -1357,7 +1357,7 @@ if not getgenv()._internal_vynixu_entity_spawner then
                 instance:Clone().Parent = latestRoom
             end
         end
-	end)
+	end))
 end
 
 Module.Clear = function(self)
