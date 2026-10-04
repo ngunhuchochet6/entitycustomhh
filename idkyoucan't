@@ -51,7 +51,7 @@ local ROOT = "https://github.com/RegularVynixu/DOORS-Entity-Spawner-V2/raw/main"
 local LocalPlayer = Players.LocalPlayer
 local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
 local Humanoid = Character:WaitForChild("Humanoid")
-local RootPart = Character.PrimaryPart or Character:FindFirstChildWhichIsA("BasePart", true)
+local RootPart = Character.PrimaryPart or Character:FindFirstChild("HumanoidRootPart") or Character:FindFirstChildWhichIsA("BasePart", true)
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 local Camera = workspace.CurrentCamera
 
@@ -72,42 +72,51 @@ local function SafeRequire(moduleScript)
     return nil, tostring(result)
 end
 
-local function RequireModule(path, label)
-    local current = PlayerGui
-    for _, name in ipairs(path) do
-        if not current then break end
-        current = current:FindFirstChild(name)
-    end
-
-    local result, err = SafeRequire(current)
-    if not result then
-        return nil, string.format("%s: %s", label or "Module", tostring(err))
-    end
-    return result
-end
-
 local Modules = {
     Module_Events = nil,
     Main_Game = nil,
 }
 
+local ModuleState = {
+    Module_Events = { Failed = false, LastAttempt = 0 },
+    Main_Game = { Failed = false, LastAttempt = 0 },
+}
+
+local MODULE_RETRY_INTERVAL = 5
+
 local function RefreshModules(force)
+    local now = os.clock()
+
     if force or Modules.Module_Events == nil then
-        local moduleScript = ReplicatedStorage:FindFirstChild("ModulesClient")
-            and ReplicatedStorage.ModulesClient:FindFirstChild("Module_Events")
-        local result = SafeRequire(moduleScript)
-        if result then
-            Modules.Module_Events = result
+        local state = ModuleState.Module_Events
+        if force or not state.Failed or now - state.LastAttempt >= MODULE_RETRY_INTERVAL then
+            state.LastAttempt = now
+            local modulesClient = ReplicatedStorage:FindFirstChild("ModulesClient")
+            local moduleScript = modulesClient and modulesClient:FindFirstChild("Module_Events")
+            local result = SafeRequire(moduleScript)
+            if result then
+                Modules.Module_Events = result
+                state.Failed = false
+            else
+                state.Failed = true
+            end
         end
     end
 
     if force or Modules.Main_Game == nil then
-        local mainUI = PlayerGui:FindFirstChild("MainUI")
-        local initiator = mainUI and mainUI:FindFirstChild("Initiator")
-        local moduleScript = initiator and initiator:FindFirstChild("Main_Game")
-        local result = SafeRequire(moduleScript)
-        if result then
-            Modules.Main_Game = result
+        local state = ModuleState.Main_Game
+        if force or not state.Failed or now - state.LastAttempt >= MODULE_RETRY_INTERVAL then
+            state.LastAttempt = now
+            local mainUI = PlayerGui:FindFirstChild("MainUI")
+            local initiator = mainUI and mainUI:FindFirstChild("Initiator")
+            local moduleScript = initiator and initiator:FindFirstChild("Main_Game")
+            local result = SafeRequire(moduleScript)
+            if result then
+                Modules.Main_Game = result
+                state.Failed = false
+            else
+                state.Failed = true
+            end
         end
     end
 
@@ -115,8 +124,6 @@ local function RefreshModules(force)
 end
 
 local function RequiredModule(name)
-    -- Do not yield here: this function is also called from the entity movement loop.
-    -- A failed require is cached until RefreshModules(true) is explicitly requested.
     RefreshModules(false)
     return Modules[name]
 end
@@ -296,7 +303,8 @@ local function OnCharacterAdded(char: Model)
 
 	Character = char
 	Humanoid = char:WaitForChild("Humanoid")
-    RootPart = char.PrimaryPart or char:FindFirstChildWhichIsA("BasePart")
+    RootPart = char.PrimaryPart or char:FindFirstChild("HumanoidRootPart") or char:FindFirstChildWhichIsA("BasePart", true)
+    Camera = workspace.CurrentCamera
 
     RefreshModules(true)
 end
@@ -418,7 +426,11 @@ local function CrucifixEntity(entity: any)
 	params.FilterDescendantsInstances = {Character, model}
 	
     local result = workspace:Raycast(entityPivot.Position, Vector3.new(0, -1000, 0), params)
-    if not result then return end
+    if not result then
+        model:SetAttribute("BeingBanished", false)
+        model:SetAttribute("Paused", false)
+        return
+    end
 
     model:SetAttribute("BeingBanished", true)
 
@@ -472,7 +484,8 @@ local function CrucifixEntity(entity: any)
 	end
 
     -- \\ Set pentagram color
-    local Color = Storage.CrucifixTypes[config.Crucifixion.Type:lower()].Color
+    local crucifixType = Storage.CrucifixTypes[config.Crucifixion.Type:lower()]
+    local Color = (crucifixType and crucifixType.Color) or Storage.CrucifixTypes.guiding.Color
 
     for _, v in next, Repentance:QueryDescendants(".GiveMeColor") do
         if v:IsA("Light") or v:IsA("BasePart") then
@@ -871,7 +884,7 @@ local function Earthquake()
     TryCameraShake("ShakeOnce", 4, 12, 1, 5)
     TryCameraShake("ShakeOnce", 10, 2, 3, 3)
 
-    if not Assets.Earthquake then
+    if not Assets.Earthquake or typeof(Assets.Earthquake) ~= "Instance" then
         return
     end
 
@@ -1111,7 +1124,8 @@ Module.Run = function(self, entity: any, copyEntity: boolean)
 
             -- Look detection
             if Humanoid.Health > 0 then
-                local _, isVisible = Camera:WorldToViewportPoint(origin)
+                Camera = workspace.CurrentCamera
+                local _, isVisible = Camera and Camera:WorldToViewportPoint(origin)
                 if isVisible then
                     task.spawn(entity.RunCallback, entity, "OnLookAt", inSight)
                 end
@@ -1381,9 +1395,12 @@ end
 
 Module.Unload = function(self)
     self:Clear()
+
     for i, connection in next, self.Connections do
         if connection then
-            pcall(function() connection:Disconnect() end)
+            pcall(function()
+                connection:Disconnect()
+            end)
         end
         self.Connections[i] = nil
     end
@@ -1393,7 +1410,13 @@ Module.Unload = function(self)
         if env.VynixuEntitySpawnerV2 == self then
             env.VynixuEntitySpawnerV2 = nil
         end
+        env._internal_vynixu_entity_spawner = nil
     end
+
+    ModuleState.Module_Events.Failed = false
+    ModuleState.Module_Events.LastAttempt = 0
+    ModuleState.Main_Game.Failed = false
+    ModuleState.Main_Game.LastAttempt = 0
 end
 
 getgenv().VynixuEntitySpawnerV2 = Module
