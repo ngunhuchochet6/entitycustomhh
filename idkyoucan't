@@ -60,8 +60,8 @@ local GameStats = ReplicatedStorage:WaitForChild("GameStats") :: Folder
 local CurrentRooms = workspace:WaitForChild("CurrentRooms") :: Folder
 
 --// Standalone compatibility adapters
---// This version intentionally does not require Main_Game or Module_Events.
---// It provides only the small interfaces used by this entity spawner.
+--// No ModuleScript require is used here. The adapter reads the real DOORS
+--// object tree when available and supplies the behavior the spawner consumes.
 
 local Modules = {
     Module_Events = nil,
@@ -98,49 +98,40 @@ local function EnsureShakerConnection()
         for i = #StandaloneShaker._states, 1, -1 do
             local state = StandaloneShaker._states[i]
             local elapsed = now - state.Started
-            local total = state.FadeIn + state.Duration + state.FadeOut
 
             if state.StopAt and now >= state.StopAt then
                 table.remove(StandaloneShaker._states, i)
                 continue
             end
 
-            if elapsed >= total then
-                table.remove(StandaloneShaker._states, i)
-                continue
-            end
-
             local alpha = 1
-
             if state.FadeIn > 0 and elapsed < state.FadeIn then
                 alpha = elapsed / state.FadeIn
-            elseif state.FadeOut > 0 and elapsed > state.FadeIn + state.Duration then
-                alpha = 1 - ((elapsed - state.FadeIn - state.Duration) / state.FadeOut)
+            elseif state.FadeOutStart then
+                alpha = 1 - ((now - state.FadeOutStart) / math.max(state.FadeOut, 0.001))
             end
 
             alpha = math.clamp(alpha, 0, 1)
 
             local roughness = math.max(state.Roughness, 1)
             local t = elapsed * roughness
+            local seed = state.Seed
 
-            local nx = math.noise(t, state.Seed, 0)
-            local ny = math.noise(0, t, state.Seed)
-            local nz = math.noise(state.Seed, 0, t)
-
+            local nx = math.noise(t, seed, 0)
+            local ny = math.noise(0, t, seed)
+            local nz = math.noise(seed, 0, t)
             offset += Vector3.new(nx, ny, nz) * state.Magnitude * 0.015 * alpha
 
-            local rx = math.noise(t, state.Seed + 11, 0)
-            local ry = math.noise(0, t, state.Seed + 23)
-            local rz = math.noise(state.Seed + 37, 0, t)
-
+            local rx = math.noise(t, seed + 11, 0)
+            local ry = math.noise(0, t, seed + 23)
+            local rz = math.noise(seed + 37, 0, t)
             rotation += Vector3.new(rx, ry, rz)
                 * math.rad(state.Magnitude * 0.08)
                 * alpha
         end
 
         if offset.Magnitude > 0 or rotation.Magnitude > 0 then
-            camera.CFrame =
-                camera.CFrame
+                camera.CFrame = camera.CFrame
                 * CFrame.new(offset)
                 * CFrame.Angles(rotation.X, rotation.Y, rotation.Z)
         end
@@ -157,22 +148,27 @@ function StandaloneShaker:StartShake(magnitude, roughness, fadeIn, fadeOut)
         Magnitude = tonumber(magnitude) or 1,
         Roughness = tonumber(roughness) or 10,
         FadeIn = math.max(tonumber(fadeIn) or 0, 0),
-        Duration = 0,
-        FadeOut = 0,
+        FadeOut = math.max(tonumber(fadeOut) or 0, 0),
+        FadeOutStart = nil,
         Started = os.clock(),
         Seed = self._rng:NextNumber(-10000, 10000),
         StopAt = nil,
+        Persistent = true,
     }
 
     table.insert(self._states, state)
     EnsureShakerConnection()
 
     local controller = {}
-
     function controller:StartFadeOut(duration)
-        state.Duration = 0
-        state.FadeOut = math.max(tonumber(duration) or 0, 0)
-        state.StopAt = os.clock() + state.FadeOut
+        duration = math.max(tonumber(duration) or state.FadeOut or 0, 0)
+        state.FadeOut = duration
+        state.FadeOutStart = os.clock()
+        state.StopAt = state.FadeOutStart + duration
+    end
+
+    function controller:Stop()
+        state.StopAt = os.clock()
     end
 
     return controller
@@ -183,27 +179,19 @@ function StandaloneShaker:ShakeOnce(magnitude, roughness, fadeIn, fadeOut)
         Magnitude = tonumber(magnitude) or 1,
         Roughness = tonumber(roughness) or 10,
         FadeIn = math.max(tonumber(fadeIn) or 0, 0),
-        Duration = 0,
         FadeOut = math.max(tonumber(fadeOut) or 0, 0),
+        FadeOutStart = nil,
         Started = os.clock(),
         Seed = self._rng:NextNumber(-10000, 10000),
         StopAt = nil,
+        Persistent = false,
     }
 
+    local total = state.FadeIn + state.FadeOut
+    state.StopAt = state.Started + total
     table.insert(self._states, state)
     EnsureShakerConnection()
-
     return state
-end
-
-local function TryCameraShake(method, ...)
-    local fn = StandaloneShaker[method]
-    if type(fn) ~= "function" then
-        return false
-    end
-
-    local ok = pcall(fn, StandaloneShaker, ...)
-    return ok
 end
 
 local function StoreRoomLightState(room)
@@ -214,69 +202,45 @@ local function StoreRoomLightState(room)
     for _, descendant in next, room:GetDescendants() do
         if descendant:IsA("Light") then
             if descendant:GetAttribute("OGBrightness") == nil then
-                descendant:SetAttribute(
-                    "OGBrightness",
-                    descendant.Brightness
-                )
+                descendant:SetAttribute("OGBrightness", descendant.Brightness)
             end
             if descendant:GetAttribute("OGEnabled") == nil then
-                descendant:SetAttribute(
-                    "OGEnabled",
-                    descendant.Enabled
-                )
+                descendant:SetAttribute("OGEnabled", descendant.Enabled)
             end
         elseif descendant:IsA("Sound") then
             if descendant:GetAttribute("OGVolume") == nil then
-                descendant:SetAttribute(
-                    "OGVolume",
-                    descendant.Volume
-                )
+                descendant:SetAttribute("OGVolume", descendant.Volume)
             end
         end
     end
 end
 
 function StandaloneEvents.toggle(room, enabled, ambient)
-    if not room then
-        return false
-    end
-
+    if not room then return false end
     StoreRoomLightState(room)
 
     for _, descendant in next, room:GetDescendants() do
         if descendant:IsA("Light") then
-            local originalBrightness =
-                descendant:GetAttribute("OGBrightness")
-
-            if enabled then
-                descendant.Enabled = true
-                if type(originalBrightness) == "number" then
-                    descendant.Brightness = originalBrightness
-                end
-            else
-                descendant.Enabled = false
+            local originalBrightness = descendant:GetAttribute("OGBrightness")
+            descendant.Enabled = enabled == true
+            if enabled and type(originalBrightness) == "number" then
+                descendant.Brightness = originalBrightness
             end
         end
     end
 
-    if ambient then
+    if ambient ~= nil then
         room:SetAttribute("AmbientOriginal", ambient)
     end
-
     return true
 end
 
 function StandaloneEvents.flicker(room, duration)
-    if not room then
-        return false
-    end
-
+    if not room then return false end
     StoreRoomLightState(room)
 
     duration = math.max(tonumber(duration) or 1, 0)
-
     local lights = {}
-
     for _, descendant in next, room:GetDescendants() do
         if descendant:IsA("Light") then
             lights[#lights + 1] = descendant
@@ -284,92 +248,151 @@ function StandaloneEvents.flicker(room, duration)
     end
 
     task.spawn(function()
-        for _ = 1, math.max(2, math.floor(duration * 8)) do
+        local steps = math.max(2, math.floor(duration * 8))
+        local stepTime = duration / steps
+        for _ = 1, steps do
             for _, light in next, lights do
                 if light.Parent then
                     light.Enabled = not light.Enabled
                 end
             end
-            task.wait(duration / math.max(2, math.floor(duration * 8)))
+            task.wait(stepTime)
         end
 
         for _, light in next, lights do
             if light.Parent then
-                light.Enabled =
-                    light:GetAttribute("OGEnabled") ~= false
-
-                local originalBrightness =
-                    light:GetAttribute("OGBrightness")
-
-                if type(originalBrightness) == "number" then
-                    light.Brightness = originalBrightness
+                light.Enabled = light:GetAttribute("OGEnabled") ~= false
+                local brightness = light:GetAttribute("OGBrightness")
+                if type(brightness) == "number" then
+                    light.Brightness = brightness
                 end
             end
         end
     end)
-
     return true
 end
 
 function StandaloneEvents.shatter(room)
-    if not room then
-        return false
-    end
-
+    if not room then return false end
     StoreRoomLightState(room)
 
     for _, descendant in next, room:GetDescendants() do
         if descendant:IsA("Light") then
             descendant.Enabled = false
             descendant:SetAttribute("Shattered", true)
-        elseif descendant:IsA("BasePart")
-            and descendant.Name == "Neon"
-        then
-            descendant:SetAttribute(
-                "OriginalTransparency",
-                descendant.Transparency
-            )
+        elseif descendant:IsA("BasePart") and descendant.Name == "Neon" then
+            if descendant:GetAttribute("OriginalTransparency") == nil then
+                descendant:SetAttribute("OriginalTransparency", descendant.Transparency)
+            end
             descendant.Transparency = 1
         end
     end
-
     return true
 end
 
--- Main_Game compatibility surface used by the original spawner.
--- The supplied Vynixu source directly consumes only:
---   1) Main_Game.camShaker
---   2) Main_Game.Health.Music (death-type fallback)
--- We expose both without requiring the game's ModuleScript.
-local StandaloneHealth = {}
+-- Main_Game compatibility layer.
+-- We do not require the Main_Game ModuleScript. Instead we expose the real
+-- child instances under PlayerGui.MainUI.Initiator.Main_Game whenever they
+-- exist, while providing a real standalone camShaker implementation.
+local MainGameAdapter = {
+    camShaker = StandaloneShaker,
+    Health = {},
+    RemoteListener = nil,
+    _module = nil,
+}
 
-function StandaloneHealth:GetMusic()
+local function ResolveMainGameInstance()
     local mainUI = PlayerGui and PlayerGui:FindFirstChild("MainUI")
     local initiator = mainUI and mainUI:FindFirstChild("Initiator")
-    local mainGame = initiator and initiator:FindFirstChild("Main_Game")
-    local health = mainGame and mainGame:FindFirstChild("Health")
+    return initiator and initiator:FindFirstChild("Main_Game")
+end
+
+local function RefreshMainGameAdapter()
+    local moduleInstance = ResolveMainGameInstance()
+    MainGameAdapter._module = moduleInstance
+
+    if moduleInstance then
+        MainGameAdapter.RemoteListener = moduleInstance:FindFirstChild("RemoteListener")
+        local health = moduleInstance:FindFirstChild("Health")
+        MainGameAdapter.Health = health or {}
+    else
+        MainGameAdapter.RemoteListener = nil
+        MainGameAdapter.Health = {}
+    end
+
+    return MainGameAdapter
+end
+
+function MainGameAdapter:GetChild(name)
+    local moduleInstance = self._module
+    if not moduleInstance or not moduleInstance.Parent then
+        moduleInstance = ResolveMainGameInstance()
+        self._module = moduleInstance
+    end
+    return moduleInstance and moduleInstance:FindFirstChild(name)
+end
+
+function MainGameAdapter.HealthGetMusic()
+    local health = MainGameAdapter:GetChild("Health")
     return health and health:FindFirstChild("Music")
 end
 
-Modules.Module_Events = StandaloneEvents
-Modules.Main_Game = {
-    camShaker = StandaloneShaker,
-    Health = StandaloneHealth,
-}
+-- Keep a stable Health proxy so both Health.Music and Health:GetMusic() work.
+local HealthProxy = {}
+setmetatable(HealthProxy, {
+    __index = function(_, key)
+        if key == "Music" then
+            return MainGameAdapter.HealthGetMusic()
+        elseif key == "GetMusic" then
+            return function()
+                return MainGameAdapter.HealthGetMusic()
+            end
+        end
 
--- Compatibility alias: the original CrucifixEntity uses CamShaker directly.
+        local health = MainGameAdapter:GetChild("Health")
+        return health and health:FindFirstChild(key)
+    end,
+})
+MainGameAdapter.Health = HealthProxy
+
+setmetatable(MainGameAdapter, {
+    __index = function(self, key)
+        if key == "Health" then
+            return HealthProxy
+        end
+
+        local moduleInstance = self._module
+        if not moduleInstance or not moduleInstance.Parent then
+            moduleInstance = ResolveMainGameInstance()
+            self._module = moduleInstance
+        end
+
+        if moduleInstance then
+            return moduleInstance:FindFirstChild(key)
+        end
+    end,
+})
+
+Modules.Module_Events = StandaloneEvents
+Modules.Main_Game = RefreshMainGameAdapter()
+
 local CamShaker = StandaloneShaker
+
+local function TryCameraShake(method, ...)
+    local fn = StandaloneShaker[method]
+    if type(fn) ~= "function" then
+        return false
+    end
+    return pcall(fn, StandaloneShaker, ...)
+end
 
 local function TryModuleEvent(method, ...)
     local events = Modules.Module_Events
     local fn = events and events[method]
-
     if type(fn) ~= "function" then
         return false
     end
-
-    local ok = pcall(fn, ...)
-    return ok
+    return pcall(fn, ...)
 end
 
 local Assets = {
@@ -572,7 +595,9 @@ local function FixRoomLights(room: Model)
 	if not roomEntrance then return end
 
     -- Clear shards
-    for _, c in next, Camera:GetChildren() do
+    local currentCamera = EnsureCamera()
+    if not currentCamera then return end
+    for _, c in next, currentCamera:GetChildren() do
         if c.Name == "Piece" then
             c:Destroy()
         end
@@ -1018,7 +1043,11 @@ local function DamagePlayer(entity: any)
                 end
             end
             if not colour then
-                local music = Modules.Main_Game.Health:GetMusic()
+                local health = Modules.Main_Game and Modules.Main_Game.Health
+                local music = health and health.Music
+                if not music and health and type(health.GetMusic) == "function" then
+                    music = health:GetMusic()
+                end
 
                 if music then
                     for _, c in next, music:GetChildren() do
@@ -1043,7 +1072,7 @@ local function DamagePlayer(entity: any)
 
         -- Set death cause
         local cause = config.Death.Cause
-        if typeof(cause) ~= "string" or cause ~= "" then
+        if typeof(cause) ~= "string" or cause == "" then
             cause = config.Entity.Name
         end
         GameStats["Player_".. LocalPlayer.Name].Total.DeathCause.Value = cause
@@ -1533,7 +1562,7 @@ Module.Run = function(self, entity: any, copyEntity: boolean)
             for _, v in next, pathfindNodes do
                 local cframe = v.CFrame + Vector3.new(0, 3 + config.Entity.HeightOffset, 0)
                 EntityMoveTo(model, cframe, config.Movement.Speed)
-                task.spawn(entity.RunCallback, entity, "OnReachNode", v)
+                task.spawn(entity.RunCallback, entity, "OnReachedNode", v)
             end
             
             -- Rebounding handling
@@ -1549,7 +1578,7 @@ Module.Run = function(self, entity: any, copyEntity: boolean)
                         local v = pathfindNodes[i]
                         local cframe = v.CFrame + Vector3.new(0, 3 + config.Entity.HeightOffset, 0)
                         EntityMoveTo(model, cframe, config.Movement.Speed)
-                        task.spawn(entity.RunCallback, entity, "OnReachNode", v)
+                        task.spawn(entity.RunCallback, entity, "OnReachedNode", v)
                     end
 
                     task.spawn(entity.RunCallback, entity, "OnRebounding", false)
@@ -1562,7 +1591,7 @@ Module.Run = function(self, entity: any, copyEntity: boolean)
                     for _, v in next, pathfindNodes do
                         local cframe = v.CFrame + Vector3.new(0, 3 + config.Entity.HeightOffset, 0)
                         EntityMoveTo(model, cframe, config.Movement.Speed)
-                        task.spawn(entity.RunCallback, entity, "OnReachNode", v)
+                        task.spawn(entity.RunCallback, entity, "OnReachedNode", v)
                     end
 
                     task.spawn(entity.RunCallback, entity, "OnRebounding", false)
@@ -1579,7 +1608,7 @@ Module.Run = function(self, entity: any, copyEntity: boolean)
             for _, n in next, nodesToCurrent do
                 local cframe = n.CFrame + Vector3.new(0, 3 + config.Entity.HeightOffset, 0)
                 EntityMoveTo(model, cframe, config.Movement.Speed)
-                task.spawn(entity.RunCallback, entity, "OnReachNode", n)
+                task.spawn(entity.RunCallback, entity, "OnReachedNode", n)
             end
             
             -- Rebound handling
@@ -1615,7 +1644,7 @@ Module.Run = function(self, entity: any, copyEntity: boolean)
                     for i = #roomNodes, nodeIndex, -1 do
                         local cframe = roomNodes[math.clamp(i, 1, #roomNodes)].CFrame + Vector3.new(0, 3 + config.Entity.HeightOffset, 0)
                         EntityMoveTo(model, cframe, config.Movement.Speed)
-                        task.spawn(entity.RunCallback, entity, "OnReachNode", roomNodes[i])
+                        task.spawn(entity.RunCallback, entity, "OnReachedNode", roomNodes[i])
                     end
                     
                     task.wait(config.Rebounding.Delay)
@@ -1625,7 +1654,7 @@ Module.Run = function(self, entity: any, copyEntity: boolean)
                     for i = nodeIndex, #roomNodes do
                         local cframe = roomNodes[math.clamp(i, 1, #roomNodes)].CFrame + Vector3.new(0, 3 + config.Entity.HeightOffset, 0)
                         EntityMoveTo(model, cframe, config.Movement.Speed)
-                        task.spawn(entity.RunCallback, entity, "OnReachNode", roomNodes[i])
+                        task.spawn(entity.RunCallback, entity, "OnReachedNode", roomNodes[i])
                     end
                 end
             end
@@ -1634,7 +1663,7 @@ Module.Run = function(self, entity: any, copyEntity: boolean)
             for _, n in next, updatedToEnd do
                 local cframe = n.CFrame + Vector3.new(0, 3 + config.Entity.HeightOffset, 0)
                 EntityMoveTo(model, cframe, config.Movement.Speed)
-                task.spawn(entity.RunCallback, entity, "OnReachNode", n)
+                task.spawn(entity.RunCallback, entity, "OnReachedNode", n)
             end
         end
 
