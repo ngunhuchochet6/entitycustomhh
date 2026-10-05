@@ -59,93 +59,297 @@ local Remotes = ReplicatedStorage:WaitForChild("RemotesFolder") :: Folder
 local GameStats = ReplicatedStorage:WaitForChild("GameStats") :: Folder
 local CurrentRooms = workspace:WaitForChild("CurrentRooms") :: Folder
 
-local function SafeRequire(moduleScript)
-    if typeof(moduleScript) ~= "Instance" or not moduleScript:IsA("ModuleScript") then
-        return nil, "ModuleScript unavailable"
-    end
-
-    local ok, result = pcall(require, moduleScript)
-    if ok then
-        return result
-    end
-
-    return nil, tostring(result)
-end
+--// Standalone compatibility adapters
+--// This version intentionally does not require Main_Game or Module_Events.
+--// It provides only the small interfaces used by this entity spawner.
 
 local Modules = {
     Module_Events = nil,
     Main_Game = nil,
 }
 
-local ModuleState = {
-    Module_Events = { Failed = false, LastAttempt = 0 },
-    Main_Game = { Failed = false, LastAttempt = 0 },
+local StandaloneEvents = {}
+local StandaloneShaker = {
+    _states = {},
+    _connection = nil,
+    _rng = Random.new(),
 }
 
-local MODULE_RETRY_INTERVAL = 5
-
-local function RefreshModules(force)
-    local now = os.clock()
-
-    if force or Modules.Module_Events == nil then
-        local state = ModuleState.Module_Events
-        if force or not state.Failed or now - state.LastAttempt >= MODULE_RETRY_INTERVAL then
-            state.LastAttempt = now
-            local modulesClient = ReplicatedStorage:FindFirstChild("ModulesClient")
-            local moduleScript = modulesClient and modulesClient:FindFirstChild("Module_Events")
-            local result = SafeRequire(moduleScript)
-            if result then
-                Modules.Module_Events = result
-                state.Failed = false
-            else
-                state.Failed = true
-            end
-        end
-    end
-
-    if force or Modules.Main_Game == nil then
-        local state = ModuleState.Main_Game
-        if force or not state.Failed or now - state.LastAttempt >= MODULE_RETRY_INTERVAL then
-            state.LastAttempt = now
-            local mainUI = PlayerGui:FindFirstChild("MainUI")
-            local initiator = mainUI and mainUI:FindFirstChild("Initiator")
-            local moduleScript = initiator and initiator:FindFirstChild("Main_Game")
-            local result = SafeRequire(moduleScript)
-            if result then
-                Modules.Main_Game = result
-                state.Failed = false
-            else
-                state.Failed = true
-            end
-        end
-    end
-
-    return Modules
+local function EnsureCamera()
+    Camera = workspace.CurrentCamera or Camera
+    return Camera
 end
 
-local function RequiredModule(name)
-    RefreshModules(false)
-    return Modules[name]
-end
-
-local function TryModuleEvent(method, ...)
-    local events = RequiredModule("Module_Events")
-    if not events or type(events[method]) ~= "function" then
-        return false
+local function EnsureShakerConnection()
+    if StandaloneShaker._connection then
+        return
     end
 
-    local ok = pcall(events[method], ...)
-    return ok
+    StandaloneShaker._connection = RunService.RenderStepped:Connect(function()
+        local camera = EnsureCamera()
+        if not camera then
+            return
+        end
+
+        local now = os.clock()
+        local offset = Vector3.zero
+        local rotation = Vector3.zero
+
+        for i = #StandaloneShaker._states, 1, -1 do
+            local state = StandaloneShaker._states[i]
+            local elapsed = now - state.Started
+            local total = state.FadeIn + state.Duration + state.FadeOut
+
+            if state.StopAt and now >= state.StopAt then
+                table.remove(StandaloneShaker._states, i)
+                continue
+            end
+
+            if elapsed >= total then
+                table.remove(StandaloneShaker._states, i)
+                continue
+            end
+
+            local alpha = 1
+
+            if state.FadeIn > 0 and elapsed < state.FadeIn then
+                alpha = elapsed / state.FadeIn
+            elseif state.FadeOut > 0 and elapsed > state.FadeIn + state.Duration then
+                alpha = 1 - ((elapsed - state.FadeIn - state.Duration) / state.FadeOut)
+            end
+
+            alpha = math.clamp(alpha, 0, 1)
+
+            local roughness = math.max(state.Roughness, 1)
+            local t = elapsed * roughness
+
+            local nx = math.noise(t, state.Seed, 0)
+            local ny = math.noise(0, t, state.Seed)
+            local nz = math.noise(state.Seed, 0, t)
+
+            offset += Vector3.new(nx, ny, nz) * state.Magnitude * 0.015 * alpha
+
+            local rx = math.noise(t, state.Seed + 11, 0)
+            local ry = math.noise(0, t, state.Seed + 23)
+            local rz = math.noise(state.Seed + 37, 0, t)
+
+            rotation += Vector3.new(rx, ry, rz)
+                * math.rad(state.Magnitude * 0.08)
+                * alpha
+        end
+
+        if offset.Magnitude > 0 or rotation.Magnitude > 0 then
+            camera.CFrame =
+                camera.CFrame
+                * CFrame.new(offset)
+                * CFrame.Angles(rotation.X, rotation.Y, rotation.Z)
+        end
+
+        if #StandaloneShaker._states == 0 then
+            StandaloneShaker._connection:Disconnect()
+            StandaloneShaker._connection = nil
+        end
+    end)
+end
+
+function StandaloneShaker:StartShake(magnitude, roughness, fadeIn, fadeOut)
+    local state = {
+        Magnitude = tonumber(magnitude) or 1,
+        Roughness = tonumber(roughness) or 10,
+        FadeIn = math.max(tonumber(fadeIn) or 0, 0),
+        Duration = 0,
+        FadeOut = 0,
+        Started = os.clock(),
+        Seed = self._rng:NextNumber(-10000, 10000),
+        StopAt = nil,
+    }
+
+    table.insert(self._states, state)
+    EnsureShakerConnection()
+
+    local controller = {}
+
+    function controller:StartFadeOut(duration)
+        state.Duration = 0
+        state.FadeOut = math.max(tonumber(duration) or 0, 0)
+        state.StopAt = os.clock() + state.FadeOut
+    end
+
+    return controller
+end
+
+function StandaloneShaker:ShakeOnce(magnitude, roughness, fadeIn, fadeOut)
+    local state = {
+        Magnitude = tonumber(magnitude) or 1,
+        Roughness = tonumber(roughness) or 10,
+        FadeIn = math.max(tonumber(fadeIn) or 0, 0),
+        Duration = 0,
+        FadeOut = math.max(tonumber(fadeOut) or 0, 0),
+        Started = os.clock(),
+        Seed = self._rng:NextNumber(-10000, 10000),
+        StopAt = nil,
+    }
+
+    table.insert(self._states, state)
+    EnsureShakerConnection()
+
+    return state
 end
 
 local function TryCameraShake(method, ...)
-    local mainGame = RequiredModule("Main_Game")
-    local shaker = mainGame and mainGame.camShaker
-    if not shaker or type(shaker[method]) ~= "function" then
+    local fn = StandaloneShaker[method]
+    if type(fn) ~= "function" then
         return false
     end
 
-    local ok = pcall(shaker[method], shaker, ...)
+    local ok = pcall(fn, StandaloneShaker, ...)
+    return ok
+end
+
+local function StoreRoomLightState(room)
+    if not room then
+        return
+    end
+
+    for _, descendant in next, room:GetDescendants() do
+        if descendant:IsA("Light") then
+            if descendant:GetAttribute("OGBrightness") == nil then
+                descendant:SetAttribute(
+                    "OGBrightness",
+                    descendant.Brightness
+                )
+            end
+            if descendant:GetAttribute("OGEnabled") == nil then
+                descendant:SetAttribute(
+                    "OGEnabled",
+                    descendant.Enabled
+                )
+            end
+        elseif descendant:IsA("Sound") then
+            if descendant:GetAttribute("OGVolume") == nil then
+                descendant:SetAttribute(
+                    "OGVolume",
+                    descendant.Volume
+                )
+            end
+        end
+    end
+end
+
+function StandaloneEvents.toggle(room, enabled, ambient)
+    if not room then
+        return false
+    end
+
+    StoreRoomLightState(room)
+
+    for _, descendant in next, room:GetDescendants() do
+        if descendant:IsA("Light") then
+            local originalBrightness =
+                descendant:GetAttribute("OGBrightness")
+
+            if enabled then
+                descendant.Enabled = true
+                if type(originalBrightness) == "number" then
+                    descendant.Brightness = originalBrightness
+                end
+            else
+                descendant.Enabled = false
+            end
+        end
+    end
+
+    if ambient then
+        room:SetAttribute("AmbientOriginal", ambient)
+    end
+
+    return true
+end
+
+function StandaloneEvents.flicker(room, duration)
+    if not room then
+        return false
+    end
+
+    StoreRoomLightState(room)
+
+    duration = math.max(tonumber(duration) or 1, 0)
+
+    local lights = {}
+
+    for _, descendant in next, room:GetDescendants() do
+        if descendant:IsA("Light") then
+            lights[#lights + 1] = descendant
+        end
+    end
+
+    task.spawn(function()
+        for _ = 1, math.max(2, math.floor(duration * 8)) do
+            for _, light in next, lights do
+                if light.Parent then
+                    light.Enabled = not light.Enabled
+                end
+            end
+            task.wait(duration / math.max(2, math.floor(duration * 8)))
+        end
+
+        for _, light in next, lights do
+            if light.Parent then
+                light.Enabled =
+                    light:GetAttribute("OGEnabled") ~= false
+
+                local originalBrightness =
+                    light:GetAttribute("OGBrightness")
+
+                if type(originalBrightness) == "number" then
+                    light.Brightness = originalBrightness
+                end
+            end
+        end
+    end)
+
+    return true
+end
+
+function StandaloneEvents.shatter(room)
+    if not room then
+        return false
+    end
+
+    StoreRoomLightState(room)
+
+    for _, descendant in next, room:GetDescendants() do
+        if descendant:IsA("Light") then
+            descendant.Enabled = false
+            descendant:SetAttribute("Shattered", true)
+        elseif descendant:IsA("BasePart")
+            and descendant.Name == "Neon"
+        then
+            descendant:SetAttribute(
+                "OriginalTransparency",
+                descendant.Transparency
+            )
+            descendant.Transparency = 1
+        end
+    end
+
+    return true
+end
+
+Modules.Module_Events = StandaloneEvents
+Modules.Main_Game = {
+    camShaker = StandaloneShaker,
+}
+
+local function TryModuleEvent(method, ...)
+    local events = Modules.Module_Events
+    local fn = events and events[method]
+
+    if type(fn) ~= "function" then
+        return false
+    end
+
+    local ok = pcall(fn, ...)
     return ok
 end
 
@@ -161,7 +365,6 @@ if type(LoadCustomInstance) == "function" then
     if ok then Assets.Earthquake = result end
 end
 
-RefreshModules(false)
 local Storage = {
     Ambient = {},
 	DeathTypes = {
@@ -305,8 +508,6 @@ local function OnCharacterAdded(char: Model)
 	Humanoid = char:WaitForChild("Humanoid")
     RootPart = char.PrimaryPart or char:FindFirstChild("HumanoidRootPart") or char:FindFirstChildWhichIsA("BasePart", true)
     Camera = workspace.CurrentCamera
-
-    RefreshModules(true)
 end
 
 local function GetCurrentRoom(latest: boolean): Model?
@@ -435,11 +636,16 @@ local function CrucifixEntity(entity: any)
     model:SetAttribute("BeingBanished", true)
 
     -- \\ Variables
-    local MainGame = RequiredModule("Main_Game")
-    local CamShaker = MainGame and MainGame.camShaker
     local TheShake = nil
-    if CamShaker and type(CamShaker.StartShake) == "function" then
-        local shakeOk, shakeResult = pcall(CamShaker.StartShake, CamShaker, 5, 20, 2, Vector3.zero)
+    do
+        local shakeOk, shakeResult = pcall(
+            StandaloneShaker.StartShake,
+            StandaloneShaker,
+            5,
+            20,
+            2,
+            0
+        )
         if shakeOk then
             TheShake = shakeResult
         end
@@ -1413,10 +1619,6 @@ Module.Unload = function(self)
         env._internal_vynixu_entity_spawner = nil
     end
 
-    ModuleState.Module_Events.Failed = false
-    ModuleState.Module_Events.LastAttempt = 0
-    ModuleState.Main_Game.Failed = false
-    ModuleState.Main_Game.LastAttempt = 0
 end
 
 getgenv().VynixuEntitySpawnerV2 = Module
